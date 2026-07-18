@@ -4,9 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "ready": "vp check && vp run -r test && vp run -r build"
+    "ready": "vp check && vp run -r test && vp run -r build",
+    "typecheck": "effect-tsgo diagnostics --project ./tsconfig.json --format json",
+    "prepare": "effect-tsgo patch"
   },
   "devDependencies": {
+    "@effect/tsgo": "0.24.1",
+    "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:"
   },

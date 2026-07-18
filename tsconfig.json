@@ -4,6 +4,52 @@
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "allowImportingTsExtensions": true,
-    "esModuleInterop": true
-  }
+    "esModuleInterop": true,
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "diagnostics": true,
+        "includeSuggestionsInTsc": true,
+        "ignoreEffectSuggestionsInTscExitCode": false,
+        "ignoreEffectWarningsInTscExitCode": false,
+        "ignoreEffectErrorsInTscExitCode": false,
+        "diagnosticSeverity": {
+          "anyUnknownInErrorContext": "warning",
+          "strictEffectProvide": "warning",
+
+          "asyncFunction": "warning",
+          "cryptoRandomUUID": "warning",
+          "cryptoRandomUUIDInEffect": "warning",
+          "extendsNativeError": "warning",
+          "globalConsole": "warning",
+          "globalConsoleInEffect": "warning",
+          "globalDate": "warning",
+          "globalDateInEffect": "warning",
+          "globalFetch": "warning",
+          "globalFetchInEffect": "warning",
+          "globalRandom": "warning",
+          "globalRandomInEffect": "warning",
+          "globalTimers": "warning",
+          "globalTimersInEffect": "warning",
+          "instanceOfSchema": "warning",
+          "newPromise": "warning",
+          "nodeBuiltinImport": "warning",
+          "processEnv": "warning",
+          "processEnvInEffect": "warning",
+          "unsafeEffectTypeAssertion": "warning",
+
+          "deterministicKeys": "warning",
+          "effectDoNotation": "warning",
+          "missedPipeableOpportunity": "warning",
+          "missingEffectServiceDependency": "warning",
+          "nestedEffectGenYield": "warning",
+          "schemaUnionOfLiterals": "warning",
+          "serviceNotAsClass": "warning",
+          "strictBooleanExpressions": "warning",
+          "unnecessaryArrowBlock": "warning"
+        }
+      }
+    ]
+  },
+  "$schema": "./node_modules/@effect/tsgo/schema.json"
 }
