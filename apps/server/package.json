@@ -1,0 +1,14 @@
+{
+  "name": "@compass/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "effect-tsgo diagnostics --project ./tsconfig.json --format json",
+    "test": "vp test run --passWithNoTests"
+  },
+  "dependencies": {
+    "@compass/contracts": "workspace:*",
+    "effect": "catalog:"
+  }
+}
