@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { NodeServices } from "@effect/platform-node";
+import { SqliteClient } from "@effect/sql-sqlite-node";
 import {
   EventBufferSize,
   DatabaseFilename,
@@ -21,6 +22,7 @@ import {
 import { Context, Effect, FileSystem, Layer, Option, Path } from "effect";
 import { TestClock } from "effect/testing";
 import { Prompt } from "effect/unstable/ai";
+import { SqlClient } from "effect/unstable/sql";
 import { SessionStore } from "./SessionStore.ts";
 import * as SqliteSessionStore from "./persistence/SqliteSessionStore.ts";
 
@@ -138,6 +140,16 @@ const exerciseStore = Effect.gen(function* () {
   );
   const failedBegin = yield* Effect.flip(store.beginTurn(queue.id, nextTurn, first));
   expect((yield* store.pendingCounts(sessionId)).queue).toBe(1);
+  const mismatchedQueuedMessage = storedMessage(
+    "0198ee50-2c74-7000-8000-000000000010",
+    3,
+    "not the queued payload",
+    nextTurnId,
+  );
+  const mismatchedBegin = yield* Effect.flip(
+    store.beginTurn(queue.id, nextTurn, mismatchedQueuedMessage),
+  );
+  expect((yield* store.pendingCounts(sessionId)).queue).toBe(1);
   yield* store.beginTurn(queue.id, nextTurn, queuedMessage);
   const steeringMessage = storedMessage(
     "0198ee50-2c74-7000-8000-000000000011",
@@ -145,7 +157,32 @@ const exerciseStore = Effect.gen(function* () {
     "steer",
     nextTurnId,
   );
+  const mismatchedSteeringMessage = storedMessage(
+    "0198ee50-2c74-7000-8000-000000000011",
+    4,
+    "not the steering payload",
+    nextTurnId,
+  );
+  const mismatchedAppend = yield* Effect.flip(
+    store.appendPendingMessage(steer.id, mismatchedSteeringMessage),
+  );
+  expect((yield* store.pendingCounts(sessionId)).steer).toBe(1);
   yield* store.appendPendingMessage(steer.id, steeringMessage);
+
+  const conflictingTurnId = TurnId.make("0198ee50-2c74-7000-8000-000000000012");
+  yield* store.createTurn(
+    new StoredTurn({
+      id: conflictingTurnId,
+      sessionId,
+      status: "completed",
+      createdAt: TimestampMillis.make(createdAt + 3_000),
+      updatedAt: TimestampMillis.make(createdAt + 3_000),
+    }),
+  );
+  const conflictingActivation = yield* Effect.flip(
+    store.updateTurnStatus(conflictingTurnId, "active"),
+  );
+  const unchangedConflictingTurn = Option.getOrThrow(yield* store.getTurn(conflictingTurnId));
   const activeTurn = Option.getOrThrow(yield* store.activeTurn(sessionId));
   const finalCounts = yield* store.pendingCounts(sessionId);
   const finalActive = yield* store.activeMessages(sessionId);
@@ -158,6 +195,10 @@ const exerciseStore = Effect.gen(function* () {
   expect(after).toEqual({ queue: 1, steer: 1 });
   expect(duplicateSession._tag).toBe("SessionPersistenceError");
   expect(failedBegin._tag).toBe("SessionPersistenceError");
+  expect(mismatchedBegin._tag).toBe("SessionPersistenceError");
+  expect(mismatchedAppend._tag).toBe("SessionPersistenceError");
+  expect(conflictingActivation._tag).toBe("SessionPersistenceError");
+  expect(unchangedConflictingTurn.status).toBe("completed");
   expect(activeTurn.id).toBe(nextTurnId);
   expect(finalCounts).toEqual({ queue: 0, steer: 0 });
   expect(finalActive.map((message) => message.id)).toEqual([
@@ -223,6 +264,79 @@ describe("SessionStore", () => {
           ),
         );
         expect(foreignKeyFailure._tag).toBe("SessionPersistenceError");
+      }),
+    ),
+  );
+
+  it.effect("reconciles legacy sessions with multiple active turns", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const platform = yield* Layer.build(NodeServices.layer);
+        const fileSystem = Context.get(platform, FileSystem.FileSystem);
+        const path = Context.get(platform, Path.Path);
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "compass-harness-legacy-",
+        });
+        const filename = path.join(directory, "state.db");
+        const olderTurnId = TurnId.make("0198ee50-2c74-7000-8000-000000000020");
+        const newerTurnId = TurnId.make("0198ee50-2c74-7000-8000-000000000021");
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const context = yield* Layer.build(SqliteClient.layer({ filename }));
+            const sql = Context.get(context, SqlClient.SqlClient);
+            yield* sql`
+              CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                configuration TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+              )
+            `;
+            yield* sql`
+              CREATE TABLE turns (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+              )
+            `;
+            yield* sql`
+              CREATE TABLE effect_sql_migrations (
+                migration_id INTEGER PRIMARY KEY NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT current_timestamp,
+                name VARCHAR(255) NOT NULL
+              )
+            `;
+            yield* sql`
+              INSERT INTO effect_sql_migrations (migration_id, name)
+              VALUES (1, 'harness')
+            `;
+            yield* sql`
+              INSERT INTO sessions (id, configuration, created_at, updated_at)
+              VALUES (${sessionId}, '{}', ${createdAt}, ${createdAt})
+            `;
+            yield* sql`
+              INSERT INTO turns (id, session_id, status, created_at, updated_at)
+              VALUES
+                (${olderTurnId}, ${sessionId}, 'active', ${createdAt}, ${createdAt}),
+                (${newerTurnId}, ${sessionId}, 'active', ${createdAt + 1}, ${createdAt + 1})
+            `;
+          }),
+        );
+
+        const context = yield* Layer.build(
+          SqliteSessionStore.layer({ filename: DatabaseFilename.make(filename) }),
+        );
+        const store = Context.get(context, SessionStore);
+        const active = Option.getOrThrow(yield* store.activeTurn(sessionId));
+        const older = Option.getOrThrow(yield* store.getTurn(olderTurnId));
+        const newer = Option.getOrThrow(yield* store.getTurn(newerTurnId));
+
+        expect(active.id).toBe(newerTurnId);
+        expect(older.status).toBe("interrupted");
+        expect(newer.status).toBe("active");
       }),
     ),
   );

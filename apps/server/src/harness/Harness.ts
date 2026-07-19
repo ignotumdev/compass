@@ -1,5 +1,6 @@
 import { NodeCrypto, NodeServices } from "@effect/platform-node";
 import { Layer } from "effect";
+import { Tokenizer } from "effect/unstable/ai";
 import { AgentHarness } from "./AgentHarness.ts";
 import { Compactor } from "./Compaction.ts";
 import { Instructions } from "./Instructions.ts";
@@ -12,6 +13,7 @@ interface HarnessLayerOptions {
   readonly store?: Layer.Layer<SessionStore>;
   readonly instructions?: Layer.Layer<Instructions>;
   readonly tokenCounter?: Layer.Layer<TokenCounter>;
+  readonly tokenizer?: Layer.Layer<Tokenizer.Tokenizer>;
 }
 
 /**
@@ -28,9 +30,12 @@ export const layer = <E, R>(
     models,
     store,
     options.instructions ?? Instructions.layer,
-    options.tokenCounter ?? TokenCounter.layer,
     NodeCrypto.layer,
+    ...(options.tokenizer === undefined ? [] : [options.tokenizer]),
   );
-  const services = Compactor.layer.pipe(Layer.provideMerge(foundations));
+  const withTokenCounter = (options.tokenCounter ?? TokenCounter.layer).pipe(
+    Layer.provideMerge(foundations),
+  );
+  const services = Compactor.layer.pipe(Layer.provideMerge(withTokenCounter));
   return AgentHarness.layer.pipe(Layer.provide(services));
 };

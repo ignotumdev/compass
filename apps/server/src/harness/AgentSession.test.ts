@@ -2,6 +2,8 @@ import { NodeCrypto } from "@effect/platform-node";
 import { describe, expect, it } from "@effect/vitest";
 import {
   EventBufferSize,
+  MessageId,
+  MessageSequence,
   ModelKey,
   PendingInputId,
   PromptInput,
@@ -10,10 +12,13 @@ import {
   SessionConfiguration,
   SessionId,
   SteerInput,
+  StoredMessage,
   StoredPendingInput,
   StoredSession,
+  StoredTurn,
   TimestampMillis,
   TokenLimit,
+  TurnId,
   type SessionEvent,
 } from "@compass/contracts";
 import { Context, Effect, Fiber, Latch, Layer, Option, Ref, Stream } from "effect";
@@ -267,6 +272,10 @@ describe("AgentSession", () => {
         expect(
           capturedPrompts[1]?.content.some((message) => promptText(message) === "steer-now"),
         ).toBe(true);
+        const active = yield* store.activeMessages(session.id);
+        expect(
+          active.find((message) => promptText(message.message) === "partial answer")?.status,
+        ).toBe("interrupted");
       }),
     ),
   );
@@ -481,6 +490,142 @@ describe("AgentSession", () => {
         expect(events[0]?._tag).toBe("SessionOpened");
         expect(events.some((event) => event._tag === "TurnStarted")).toBe(true);
         expect(yield* store.pendingCounts(session.id)).toEqual({ queue: 0, steer: 0 });
+      }),
+    ),
+  );
+
+  it.effect("settles a recovered turn whose final response was already committed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let calls = 0;
+        const languageModelLayer = Layer.effect(
+          LanguageModel.LanguageModel,
+          LanguageModel.make({
+            generateText: () => Effect.succeed([]),
+            streamText: () => {
+              calls += 1;
+              return Stream.fromIterable(textResponse("duplicate"));
+            },
+          }),
+        );
+        const binding = {
+          provider: ProviderKey.make("test"),
+          model: ModelKey.make("idempotent-recovery"),
+          layer: languageModelLayer,
+        };
+        const timestamp = TimestampMillis.make(1_700_000_000_000);
+        const session = new StoredSession({
+          id: SessionId.make("0198ee50-2c74-7000-8000-000000000017"),
+          configuration: new SessionConfiguration({
+            provider: binding.provider,
+            model: binding.model,
+            systemInstructions: "",
+            compactAtTokens: TokenLimit.make(100_000),
+            summaryMaxTokens: TokenLimit.make(1_000),
+            eventBufferSize: EventBufferSize.make(128),
+          }),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        const turn = new StoredTurn({
+          id: TurnId.make("0198ee50-2c74-7000-8000-000000000018"),
+          sessionId: session.id,
+          status: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        const user = new StoredMessage({
+          id: MessageId.make("0198ee50-2c74-7000-8000-000000000019"),
+          sessionId: session.id,
+          turnId: turn.id,
+          sequence: MessageSequence.make(0),
+          message: userMessage("original"),
+          status: "complete",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        const toolCall = new StoredMessage({
+          id: MessageId.make("0198ee50-2c74-7000-8000-000000000020"),
+          sessionId: session.id,
+          turnId: turn.id,
+          sequence: MessageSequence.make(1),
+          message: Prompt.assistantMessage({
+            content: [
+              Prompt.makePart("tool-call", {
+                id: "execute-1",
+                name: "execute",
+                params: { command: "pwd" },
+                providerExecuted: false,
+              }),
+            ],
+          }),
+          status: "complete",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        const toolResult = new StoredMessage({
+          id: MessageId.make("0198ee50-2c74-7000-8000-000000000021"),
+          sessionId: session.id,
+          turnId: turn.id,
+          sequence: MessageSequence.make(2),
+          message: Prompt.toolMessage({
+            content: [
+              Prompt.makePart("tool-result", {
+                id: "execute-1",
+                name: "execute",
+                isFailure: false,
+                result: "done",
+              }),
+            ],
+          }),
+          status: "complete",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        const assistant = new StoredMessage({
+          id: MessageId.make("0198ee50-2c74-7000-8000-000000000022"),
+          sessionId: session.id,
+          turnId: turn.id,
+          sequence: MessageSequence.make(3),
+          message: Prompt.assistantMessage({
+            content: [Prompt.textPart({ text: "already committed" })],
+          }),
+          status: "complete",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        const storeContext = yield* Layer.build(SessionStore.layerMemory);
+        const store = Context.get(storeContext, SessionStore);
+        yield* store.createSession(session);
+        yield* store.createTurn(turn);
+        yield* store.appendMessage(user, true);
+        yield* store.appendMessage(toolCall, true);
+        yield* store.appendMessage(toolResult, true);
+        yield* store.appendMessage(assistant, true);
+        const dependencies = Layer.mergeAll(
+          Layer.succeed(SessionStore, store),
+          Instructions.layer,
+          TokenCounter.layer,
+          ConversationModel.layer(binding),
+          Layer.succeed(
+            Compactor,
+            Compactor.of({ compact: () => Effect.die("compaction was not expected") }),
+          ),
+          NodeCrypto.layer,
+        );
+        const context = yield* Layer.build(
+          AgentSession.layer(session).pipe(Layer.provideMerge(dependencies)),
+        );
+        const agent = Context.get(context, AgentSession);
+
+        yield* agent.waitForIdle;
+
+        expect(calls).toBe(0);
+        expect(Option.getOrThrow(yield* store.getTurn(turn.id)).status).toBe("completed");
+        const active = yield* store.activeMessages(session.id);
+        expect(
+          active.filter((message) => promptText(message.message) === "already committed"),
+        ).toHaveLength(1);
       }),
     ),
   );

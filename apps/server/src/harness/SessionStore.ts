@@ -17,7 +17,7 @@ import {
   type TurnStatus,
   TokenCount,
 } from "@compass/contracts";
-import { Clock, Context, Effect, Layer, Option, Ref } from "effect";
+import { Clock, Context, Effect, Equal, Layer, Option, Ref } from "effect";
 
 export interface SessionStoreService {
   readonly createSession: (session: StoredSession) => Effect.Effect<void, SessionPersistenceError>;
@@ -161,23 +161,42 @@ export class SessionStore extends Context.Service<SessionStore, SessionStoreServ
         status: TurnStatus,
       ) {
         const updatedAt = TimestampMillis.make(yield* Clock.currentTimeMillis);
-        yield* Ref.update(state, (current) => {
+        const updated = yield* Ref.modify(state, (current) => {
           const turn = current.turns.get(turnId);
-          if (turn === undefined) return current;
-          return {
-            ...current,
-            turns: new Map(current.turns).set(
-              turnId,
-              new StoredTurn({
-                id: turn.id,
-                sessionId: turn.sessionId,
-                status,
-                createdAt: turn.createdAt,
-                updatedAt,
-              }),
-            ),
-          };
+          if (turn === undefined) return [true, current] as const;
+          const conflictingActiveTurn =
+            status === "active" &&
+            [...current.turns.values()].some(
+              (existing) =>
+                existing.id !== turn.id &&
+                existing.sessionId === turn.sessionId &&
+                existing.status === "active",
+            );
+          if (conflictingActiveTurn) return [false, current] as const;
+          return [
+            true,
+            {
+              ...current,
+              turns: new Map(current.turns).set(
+                turnId,
+                new StoredTurn({
+                  id: turn.id,
+                  sessionId: turn.sessionId,
+                  status,
+                  createdAt: turn.createdAt,
+                  updatedAt,
+                }),
+              ),
+            },
+          ] as const;
         });
+        if (!updated) {
+          return yield* new SessionPersistenceError({
+            operation: "updateTurnStatus",
+            message: `Turn ${turnId} conflicts with the active turn for its session`,
+            cause: new Error("Concurrently active turn"),
+          });
+        }
       });
 
       const appendMessage = Effect.fn("SessionStore.memory.appendMessage")(function* (
@@ -350,12 +369,13 @@ export class SessionStore extends Context.Service<SessionStore, SessionStoreServ
       ) {
         const committed = yield* Ref.modify(state, (current) => {
           const pending = current.pending.get(firstMessage.sessionId) ?? [];
-          const hasInput = pending.some((input) => input.id === inputId);
+          const input = pending.find((input) => input.id === inputId);
           const hasActiveTurn = [...current.turns.values()].some(
             (existing) => existing.sessionId === turn.sessionId && existing.status === "active",
           );
           if (
-            !hasInput ||
+            input === undefined ||
+            !Equal.equals(input.message, firstMessage.message) ||
             turn.status !== "active" ||
             turn.sessionId !== firstMessage.sessionId ||
             firstMessage.turnId !== turn.id ||
@@ -397,7 +417,12 @@ export class SessionStore extends Context.Service<SessionStore, SessionStoreServ
       ) {
         const committed = yield* Ref.modify(state, (current) => {
           const pending = current.pending.get(message.sessionId) ?? [];
-          if (!pending.some((input) => input.id === inputId) || current.messages.has(message.id)) {
+          const input = pending.find((input) => input.id === inputId);
+          if (
+            input === undefined ||
+            !Equal.equals(input.message, message.message) ||
+            current.messages.has(message.id)
+          ) {
             return [false, current] as const;
           }
           return [

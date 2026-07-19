@@ -21,7 +21,7 @@ import {
   type TurnStatus,
 } from "@compass/contracts";
 import { SqliteClient, SqliteMigrator } from "@effect/sql-sqlite-node";
-import { Config, Effect, FileSystem, Layer, Option, Path, Schema } from "effect";
+import { Config, Effect, Equal, FileSystem, Layer, Option, Path, Schema } from "effect";
 import { Prompt } from "effect/unstable/ai";
 import { SqlClient } from "effect/unstable/sql";
 import { SessionStore, type SessionStoreService } from "../SessionStore.ts";
@@ -63,7 +63,6 @@ const TurnRow = Schema.Struct({
 const PositionRow = Schema.Struct({ position: Schema.Finite });
 const SequenceRow = Schema.Struct({ sequence: Schema.Finite });
 const CountsRow = Schema.Struct({ queue: Schema.Finite, steer: Schema.Finite });
-const IdRow = Schema.Struct({ id: Schema.String });
 
 const migration = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -123,6 +122,26 @@ const migration = Effect.gen(function* () {
 
 const activeTurnMigration = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  // Before this invariant was enforced, a crash followed by recovery could
+  // create more than one active turn. Keep the newest turn recoverable and
+  // settle every older active turn before installing the unique index.
+  yield* sql`
+    UPDATE turns AS older
+    SET
+      status = 'interrupted',
+      updated_at = MAX(updated_at, unixepoch('subsec') * 1000)
+    WHERE older.status = 'active'
+      AND EXISTS (
+        SELECT 1
+        FROM turns AS newer
+        WHERE newer.session_id = older.session_id
+          AND newer.status = 'active'
+          AND (
+            newer.created_at > older.created_at
+            OR (newer.created_at = older.created_at AND newer.id > older.id)
+          )
+      )
+  `;
   yield* sql`
     CREATE UNIQUE INDEX IF NOT EXISTS one_active_turn_per_session
     ON turns(session_id)
@@ -428,7 +447,7 @@ const make = Effect.fn("SqliteSessionStore.make")(function* () {
     operation: string,
   ) {
     const rows = yield* sql`
-        SELECT id
+        SELECT id, session_id AS sessionId, kind, message, created_at AS createdAt
         FROM pending_inputs
         WHERE id = ${inputId} AND session_id = ${sessionId}
         LIMIT 1
@@ -440,7 +459,7 @@ const make = Effect.fn("SqliteSessionStore.make")(function* () {
         cause: new Error("Pending input missing"),
       });
     }
-    yield* Schema.decodeUnknownEffect(IdRow)(rows[0]);
+    return yield* decodePending(rows[0]);
   });
 
   const beginTurn = Effect.fn("SqliteSessionStore.beginTurn")(function* (
@@ -461,7 +480,14 @@ const make = Effect.fn("SqliteSessionStore.make")(function* () {
     }
     yield* sql.withTransaction(
       Effect.gen(function* () {
-        yield* requirePending(inputId, turn.sessionId, "beginTurn");
+        const input = yield* requirePending(inputId, turn.sessionId, "beginTurn");
+        if (!Equal.equals(input.message, firstMessage.message)) {
+          return yield* new SessionPersistenceError({
+            operation: "beginTurn",
+            message: `Pending input ${inputId} does not match the first turn message`,
+            cause: new Error("Pending input payload mismatch"),
+          });
+        }
         yield* sql`
             INSERT INTO turns (id, session_id, status, created_at, updated_at)
             VALUES (${turn.id}, ${turn.sessionId}, ${turn.status}, ${turn.createdAt}, ${turn.updatedAt})
@@ -478,7 +504,14 @@ const make = Effect.fn("SqliteSessionStore.make")(function* () {
   ) {
     yield* sql.withTransaction(
       Effect.gen(function* () {
-        yield* requirePending(inputId, message.sessionId, "appendPendingMessage");
+        const input = yield* requirePending(inputId, message.sessionId, "appendPendingMessage");
+        if (!Equal.equals(input.message, message.message)) {
+          return yield* new SessionPersistenceError({
+            operation: "appendPendingMessage",
+            message: `Pending input ${inputId} does not match the appended message`,
+            cause: new Error("Pending input payload mismatch"),
+          });
+        }
         yield* insertMessage(message, true);
         yield* sql`DELETE FROM pending_inputs WHERE id = ${inputId}`;
       }),

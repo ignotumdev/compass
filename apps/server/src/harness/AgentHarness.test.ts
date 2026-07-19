@@ -7,7 +7,7 @@ import {
   TokenLimit,
 } from "@compass/contracts";
 import { Context, Effect, Layer, Stream } from "effect";
-import { LanguageModel, Prompt, type Response } from "effect/unstable/ai";
+import { LanguageModel, Prompt, type Response, Tokenizer } from "effect/unstable/ai";
 import { AgentHarness } from "./AgentHarness.ts";
 import * as Harness from "./Harness.ts";
 import { CompactionModel, ConversationModel } from "./Models.ts";
@@ -85,8 +85,17 @@ describe("AgentHarness", () => {
           ConversationModel.layer(binding),
           CompactionModel.layer(binding),
         );
+        const tokenizer = Tokenizer.make({
+          tokenize: (prompt) => {
+            const characters = prompt.content.flatMap((message) => Array.from(promptText(message)));
+            return Effect.succeed(characters.map((_, index) => index));
+          },
+        });
         const context = yield* Layer.build(
-          Harness.layer(models, { store: SessionStore.layerMemory }),
+          Harness.layer(models, {
+            store: SessionStore.layerMemory,
+            tokenizer: Layer.succeed(Tokenizer.Tokenizer, tokenizer),
+          }),
         );
         const harness = Context.get(context, AgentHarness);
         const session = yield* harness.create({
@@ -112,6 +121,11 @@ describe("AgentHarness", () => {
         expect(
           secondPrompt?.content.some((message) =>
             promptText(message).includes("Conversation summary"),
+          ),
+        ).toBe(true);
+        expect(
+          secondPrompt?.content.some((message) =>
+            promptText(message).includes("Conversation summary:\n\nThe user establi"),
           ),
         ).toBe(true);
         expect(

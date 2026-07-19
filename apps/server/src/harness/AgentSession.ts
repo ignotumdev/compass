@@ -20,12 +20,14 @@ import {
   SessionPersistenceError,
   SessionSettled,
   StoredMessage,
+  type StoredMessageStatus,
   StoredPendingInput,
   type StoredSession,
   StoredTurn,
   type TokenCount,
   TurnCompleted,
   type TurnId,
+  type TurnStatus,
   TurnStarted,
 } from "@compass/contracts";
 import {
@@ -197,6 +199,7 @@ export class AgentSession extends Context.Service<
           turnId: TurnId,
           message: Prompt.Message,
           requestedId?: StoredMessage["id"],
+          status: StoredMessageStatus = "complete",
         ) {
           const [messageId, sequence, timestamp] = yield* Effect.all([
             requestedId === undefined ? makeMessageId(crypto) : Effect.succeed(requestedId),
@@ -209,7 +212,7 @@ export class AgentSession extends Context.Service<
             turnId,
             sequence,
             message,
-            status: "complete",
+            status,
             createdAt: timestamp,
             updatedAt: timestamp,
           });
@@ -242,9 +245,10 @@ export class AgentSession extends Context.Service<
             options?: {
               readonly id?: StoredMessage["id"];
               readonly alreadyStarted?: boolean;
+              readonly status?: StoredMessageStatus;
             },
           ) {
-            const stored = yield* makeStoredMessage(turnId, message, options?.id);
+            const stored = yield* makeStoredMessage(turnId, message, options?.id, options?.status);
             if (options?.alreadyStarted !== true) {
               yield* publishMessageStarted(stored);
             }
@@ -308,6 +312,7 @@ export class AgentSession extends Context.Service<
           turnId: TurnId,
           parts: ReadonlyArray<Response.AnyPart>,
           assistantMessageId: StoredMessage["id"],
+          status: StoredMessageStatus,
         ) {
           const responsePrompt = Prompt.fromResponseParts(parts);
           let first = true;
@@ -315,7 +320,7 @@ export class AgentSession extends Context.Service<
             yield* appendMessage(
               turnId,
               message,
-              first ? { id: assistantMessageId, alreadyStarted: true } : undefined,
+              first ? { id: assistantMessageId, alreadyStarted: true, status } : { status },
             );
             first = false;
           }
@@ -397,8 +402,14 @@ export class AgentSession extends Context.Service<
                 ),
               ),
             );
+            const interrupted = yield* Deferred.isDone(interruptSignal);
             yield* setPhase("resolving-tools");
-            yield* persistResponse(turnId, parts, assistantMessageId);
+            yield* persistResponse(
+              turnId,
+              parts,
+              assistantMessageId,
+              interrupted ? "interrupted" : "complete",
+            );
             return {
               compact: yield* Ref.get(compactionRequested),
               hasToolCalls: parts.some((part) => part.type === "tool-call"),
@@ -433,6 +444,15 @@ export class AgentSession extends Context.Service<
               : platformFailure("append a pending session message", cause),
           ),
         );
+
+        const settleTurn = Effect.fn("AgentSession.settleTurn")(function* (
+          turnId: TurnId,
+          status: Extract<TurnStatus, "completed" | "interrupted">,
+        ) {
+          yield* setPhase("settling");
+          yield* store.updateTurnStatus(turnId, status);
+          yield* publish(new TurnCompleted({ sessionId: session.id, turnId }));
+        });
 
         const continueTurn = Effect.fn("AgentSession.continueTurn")(
           function* (turnId: TurnId, initialLatestUser: StoredMessage) {
@@ -481,10 +501,8 @@ export class AgentSession extends Context.Service<
               running = false;
             }
 
-            yield* setPhase("settling");
             const stopped = yield* Ref.getAndSet(stopRequested, false);
-            yield* store.updateTurnStatus(turnId, stopped ? "interrupted" : "completed");
-            yield* publish(new TurnCompleted({ sessionId: session.id, turnId }));
+            yield* settleTurn(turnId, stopped ? "interrupted" : "completed");
           },
           (effect, turnId) =>
             Effect.onError(effect, () =>
@@ -517,22 +535,52 @@ export class AgentSession extends Context.Service<
           function* (turn: StoredTurn) {
             yield* publish(new TurnStarted({ sessionId: session.id, turnId: turn.id }));
             const active = yield* store.activeMessages(session.id);
-            let latestUser: StoredMessage | undefined;
+            let latestUserIndex = -1;
             for (let index = active.length - 1; index >= 0; index -= 1) {
               const message = active[index]!;
               if (message.turnId === turn.id && message.message.role === "user") {
-                latestUser = message;
+                latestUserIndex = index;
                 break;
               }
             }
-            if (latestUser === undefined) {
+            if (latestUserIndex < 0) {
               return yield* new InvalidSessionStateError({
                 sessionId: session.id,
                 phase: yield* Ref.get(phase),
                 message: `Cannot recover active turn ${turn.id} without a user message`,
               });
             }
-            yield* continueTurn(turn.id, latestUser);
+
+            const steering = yield* store.peekPending(session.id, "steer");
+            if (Option.isSome(steering)) {
+              const latestUser = yield* appendPendingInput(turn.id, steering.value);
+              const pendingAfterSteer = yield* store.pendingCounts(session.id);
+              yield* Ref.set(steerRequested, pendingAfterSteer.steer > 0);
+              yield* publishQueue();
+              yield* continueTurn(turn.id, latestUser);
+              return;
+            }
+
+            const responseMessages = active
+              .slice(latestUserIndex + 1)
+              .filter((message) => message.turnId === turn.id);
+            const latestResponse = responseMessages.at(-1);
+            if (latestResponse?.status === "interrupted") {
+              yield* settleTurn(turn.id, "interrupted");
+              return;
+            }
+
+            const latestAssistantIsTerminal =
+              latestResponse?.message.role === "assistant" &&
+              !latestResponse.message.content.some(
+                (part) => part.type === "tool-call" || part.type === "tool-approval-request",
+              );
+            if (latestAssistantIsTerminal) {
+              yield* settleTurn(turn.id, "completed");
+              return;
+            }
+
+            yield* continueTurn(turn.id, active[latestUserIndex]!);
           },
           (effect, turn) =>
             Effect.onError(effect, () =>

@@ -8,8 +8,8 @@ import {
   type TokenCount,
   type TurnId,
 } from "@compass/contracts";
-import { Context, Crypto, Effect, Layer, Schema } from "effect";
-import { LanguageModel, Prompt } from "effect/unstable/ai";
+import { Context, Crypto, Effect, Layer, Option, Schema } from "effect";
+import { LanguageModel, Prompt, Tokenizer } from "effect/unstable/ai";
 import { CompactionModel } from "./Models.ts";
 import { SessionStore } from "./SessionStore.ts";
 import { makeMessageId, now } from "./internal/Ids.ts";
@@ -22,14 +22,8 @@ Do not address the user and do not invent facts.`;
 const serializeMessages = (messages: ReadonlyArray<StoredMessage>) =>
   JSON.stringify(messages.map((stored) => Schema.encodeSync(Prompt.Message)(stored.message)));
 
-/**
- * Effect AI deliberately keeps provider generation settings out of the shared
- * LanguageModel request. Enforce the session limit before persistence using
- * the same conservative UTF-8 estimate as the token counter fallback.
- */
-export const limitSummaryText = (text: string, maxTokens: number): string => {
+const limitSummaryTextByUtf8Bytes = (text: string, maximumBytes: number): string => {
   const encoder = new TextEncoder();
-  const maximumBytes = maxTokens * 4;
   if (encoder.encode(text).byteLength <= maximumBytes) return text;
 
   const characters: Array<string> = [];
@@ -42,6 +36,50 @@ export const limitSummaryText = (text: string, maxTokens: number): string => {
   }
   return characters.join("").trimEnd();
 };
+
+const limitSummaryTextWithTokenizer = Effect.fn("Compactor.limitSummaryTextWithTokenizer")(
+  function* (text: string, maxTokens: number, tokenizer: Tokenizer.Service) {
+    const tokens = yield* tokenizer.tokenize(text);
+    if (tokens.length <= maxTokens) return text;
+
+    const characters = Array.from(text);
+    let characterCount = Math.max(
+      1,
+      Math.min(characters.length - 1, Math.floor((characters.length * maxTokens) / tokens.length)),
+    );
+
+    while (characterCount > 0) {
+      const candidate = characters.slice(0, characterCount).join("").trimEnd();
+      if (candidate.length === 0) return "";
+
+      const candidateTokens = yield* tokenizer.tokenize(candidate);
+      if (candidateTokens.length <= maxTokens) return candidate;
+
+      characterCount = Math.min(
+        characterCount - 1,
+        Math.floor((characterCount * maxTokens) / candidateTokens.length),
+      );
+    }
+
+    return "";
+  },
+);
+
+/**
+ * Enforces the model-specific token limit when an Effect AI Tokenizer is
+ * installed. Without one, each permitted token is conservatively treated as
+ * one UTF-8 byte instead of relying on a bytes-per-token average.
+ */
+export const limitSummaryText = Effect.fn("Compactor.limitSummaryText")(function* (
+  text: string,
+  maxTokens: number,
+) {
+  const tokenizer = yield* Effect.serviceOption(Tokenizer.Tokenizer);
+  return yield* Option.match(tokenizer, {
+    onNone: () => Effect.succeed(limitSummaryTextByUtf8Bytes(text, maxTokens)),
+    onSome: (service) => limitSummaryTextWithTokenizer(text, maxTokens, service),
+  });
+});
 
 export class Compactor extends Context.Service<
   Compactor,
@@ -117,7 +155,7 @@ export class Compactor extends Context.Service<
                 );
           const response = yield* generationWithLimit;
 
-          const summaryText = limitSummaryText(
+          const summaryText = yield* limitSummaryText(
             response.text.trim(),
             session.configuration.summaryMaxTokens,
           );
