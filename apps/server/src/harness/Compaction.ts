@@ -77,7 +77,10 @@ export const limitSummaryText = Effect.fn("Compactor.limitSummaryText")(function
   const tokenizer = yield* Effect.serviceOption(Tokenizer.Tokenizer);
   return yield* Option.match(tokenizer, {
     onNone: () => Effect.succeed(limitSummaryTextByUtf8Bytes(text, maxTokens)),
-    onSome: (service) => limitSummaryTextWithTokenizer(text, maxTokens, service),
+    onSome: (service) =>
+      limitSummaryTextWithTokenizer(text, maxTokens, service).pipe(
+        Effect.orElseSucceed(() => limitSummaryTextByUtf8Bytes(text, maxTokens)),
+      ),
   });
 });
 

@@ -571,6 +571,7 @@ export class AgentSession extends Context.Service<
             }
 
             const latestAssistantIsTerminal =
+              latestResponse?.status === "complete" &&
               latestResponse?.message.role === "assistant" &&
               !latestResponse.message.content.some(
                 (part) => part.type === "tool-call" || part.type === "tool-approval-request",

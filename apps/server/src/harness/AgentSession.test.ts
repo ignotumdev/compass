@@ -551,7 +551,7 @@ describe("AgentSession", () => {
           sequence: MessageSequence.make(1),
           message: Prompt.assistantMessage({
             content: [
-              Prompt.makePart("tool-call", {
+              Prompt.toolCallPart({
                 id: "execute-1",
                 name: "execute",
                 params: { command: "pwd" },
@@ -570,7 +570,7 @@ describe("AgentSession", () => {
           sequence: MessageSequence.make(2),
           message: Prompt.toolMessage({
             content: [
-              Prompt.makePart("tool-result", {
+              Prompt.toolResultPart({
                 id: "execute-1",
                 name: "execute",
                 isFailure: false,
@@ -626,6 +626,57 @@ describe("AgentSession", () => {
         expect(
           active.filter((message) => promptText(message.message) === "already committed"),
         ).toHaveLength(1);
+
+        const streamingSession = new StoredSession({
+          id: SessionId.make("0198ee50-2c74-7000-8000-000000000023"),
+          configuration: session.configuration,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        const streamingTurn = new StoredTurn({
+          id: TurnId.make("0198ee50-2c74-7000-8000-000000000024"),
+          sessionId: streamingSession.id,
+          status: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        const streamingUser = new StoredMessage({
+          id: MessageId.make("0198ee50-2c74-7000-8000-000000000025"),
+          sessionId: streamingSession.id,
+          turnId: streamingTurn.id,
+          sequence: MessageSequence.make(0),
+          message: userMessage("resume the checkpoint"),
+          status: "complete",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        const streamingAssistant = new StoredMessage({
+          id: MessageId.make("0198ee50-2c74-7000-8000-000000000026"),
+          sessionId: streamingSession.id,
+          turnId: streamingTurn.id,
+          sequence: MessageSequence.make(1),
+          message: Prompt.assistantMessage({
+            content: [Prompt.textPart({ text: "checkpoint" })],
+          }),
+          status: "streaming",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        yield* store.createSession(streamingSession);
+        yield* store.createTurn(streamingTurn);
+        yield* store.appendMessage(streamingUser, true);
+        yield* store.appendMessage(streamingAssistant, true);
+        const streamingContext = yield* Layer.build(
+          AgentSession.layer(streamingSession).pipe(Layer.provideMerge(dependencies)),
+        );
+        const streamingAgent = Context.get(streamingContext, AgentSession);
+
+        yield* streamingAgent.waitForIdle;
+
+        expect(calls).toBe(1);
+        expect(Option.getOrThrow(yield* store.getTurn(streamingTurn.id)).status).toBe("completed");
+        const resumed = yield* store.activeMessages(streamingSession.id);
+        expect(resumed.filter((message) => message.message.role === "assistant")).toHaveLength(2);
       }),
     ),
   );

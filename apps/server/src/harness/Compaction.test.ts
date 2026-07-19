@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { Prompt, Tokenizer } from "effect/unstable/ai";
+import { AiError, Prompt, Tokenizer } from "effect/unstable/ai";
 import { limitSummaryText } from "./Compaction.ts";
 
 describe("Compaction", () => {
@@ -32,6 +32,27 @@ describe("Compaction", () => {
 
       expect(new TextEncoder().encode(limited).byteLength).toBeLessThanOrEqual(3);
       expect(limited).toBe("\u00e9");
+    }),
+  );
+
+  it.effect("falls back when the installed tokenizer fails", () =>
+    Effect.gen(function* () {
+      const tokenizer = Tokenizer.make({
+        tokenize: () =>
+          Effect.fail(
+            AiError.make({
+              module: "CompactionTest",
+              method: "tokenize",
+              reason: new AiError.InternalProviderError({ description: "tokenizer failed" }),
+            }),
+          ),
+      });
+
+      const limited = yield* limitSummaryText("abcdefgh", 3).pipe(
+        Effect.provideService(Tokenizer.Tokenizer, tokenizer),
+      );
+
+      expect(limited).toBe("abc");
     }),
   );
 
