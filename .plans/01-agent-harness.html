@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>01 · Compass Agent Harness Plan</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+              mono: ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "monospace"],
+            },
+          },
+        },
+      };
+    </script>
+    <style>
+      html {
+        color-scheme: dark;
+      }
+      body {
+        text-rendering: optimizeLegibility;
+      }
+    </style>
+  </head>
+  <body
+    class="min-h-screen bg-neutral-950 text-neutral-50 antialiased selection:bg-neutral-50 selection:text-neutral-950"
+  >
+    <main class="mx-auto max-w-6xl px-5 py-12 sm:px-8 lg:py-20">
+      <header class="border-b border-neutral-800 pb-10">
+        <div
+          class="flex flex-wrap items-center gap-3 text-xs font-medium uppercase tracking-[0.22em] text-neutral-500"
+        >
+          <span>Compass</span>
+          <span class="h-1 w-1 rounded-full bg-neutral-700"></span>
+          <span>Implementation plan 01</span>
+          <span
+            class="rounded-full border border-neutral-700 px-2.5 py-1 normal-case tracking-normal text-neutral-300"
+            >Ready for review</span
+          >
+        </div>
+        <div class="mt-7 grid gap-6 lg:grid-cols-[1fr_20rem] lg:items-end">
+          <div>
+            <h1 class="max-w-3xl text-4xl font-semibold tracking-tight sm:text-6xl">
+              Effect-native agent harness
+            </h1>
+            <p class="mt-5 max-w-3xl text-base leading-7 text-neutral-400 sm:text-lg">
+              A persistent, provider-neutral session runtime built on
+              <span class="text-neutral-200">effect/unstable/ai</span>, with OpenRouter as the first
+              adapter, safe steering, queued turns, streaming events, and automatic or
+              tool-requested compaction.
+            </p>
+          </div>
+          <dl
+            class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-neutral-800 bg-neutral-800 text-sm"
+          >
+            <div class="bg-neutral-900 p-4">
+              <dt class="text-neutral-500">Runtime</dt>
+              <dd class="mt-1 text-neutral-100">Effect v4</dd>
+            </div>
+            <div class="bg-neutral-900 p-4">
+              <dt class="text-neutral-500">Provider</dt>
+              <dd class="mt-1 text-neutral-100">OpenRouter first</dd>
+            </div>
+            <div class="bg-neutral-900 p-4">
+              <dt class="text-neutral-500">Storage</dt>
+              <dd class="mt-1 text-neutral-100">SQLite / WAL</dd>
+            </div>
+            <div class="bg-neutral-900 p-4">
+              <dt class="text-neutral-500">I/O</dt>
+              <dd class="mt-1 text-neutral-100">Streams + PubSub</dd>
+            </div>
+          </dl>
+        </div>
+      </header>
+
+      <section class="py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">01 · Outcome</p>
+        <div class="mt-5 grid gap-4 md:grid-cols-3">
+          <article class="rounded-xl border border-neutral-800 bg-neutral-900/60 p-5">
+            <h2 class="font-medium">Durable sessions</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              Sessions, turns, messages, active context, and pending queue entries survive process
+              restarts in <code class="text-neutral-200">$HOME/.compass/state.db</code>.
+            </p>
+          </article>
+          <article class="rounded-xl border border-neutral-800 bg-neutral-900/60 p-5">
+            <h2 class="font-medium">Safe conversation loop</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              One active turn per session. Tool calls finish with matching results before steering
+              is injected; queued input begins only after the active turn settles.
+            </p>
+          </article>
+          <article class="rounded-xl border border-neutral-800 bg-neutral-900/60 p-5">
+            <h2 class="font-medium">Provider-neutral core</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              The harness depends on captured Effect AI models and tokenization services. OpenRouter
+              wiring stays in an adapter and no model name is hard-coded.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+          02 · Vocabulary and invariants
+        </p>
+        <div class="mt-6 overflow-hidden rounded-xl border border-neutral-800">
+          <div
+            class="grid border-b border-neutral-800 bg-neutral-900 px-5 py-3 text-xs uppercase tracking-wider text-neutral-500 md:grid-cols-[10rem_1fr]"
+          >
+            <span>Term</span><span class="hidden md:block">Meaning</span>
+          </div>
+          <dl class="divide-y divide-neutral-800 bg-neutral-950">
+            <div class="grid gap-2 px-5 py-4 md:grid-cols-[10rem_1fr]">
+              <dt class="font-medium">Session</dt>
+              <dd class="text-sm leading-6 text-neutral-400">
+                The entire durable conversation: configuration, active context, archived
+                pre-compaction history, turns, and pending inputs.
+              </dd>
+            </div>
+            <div class="grid gap-2 px-5 py-4 md:grid-cols-[10rem_1fr]">
+              <dt class="font-medium">Turn</dt>
+              <dd class="text-sm leading-6 text-neutral-400">
+                Starts with a prompt user message and includes assistant/tool exchanges until the
+                model stops. Steering messages join the active turn; queued messages start later
+                turns.
+              </dd>
+            </div>
+            <div class="grid gap-2 px-5 py-4 md:grid-cols-[10rem_1fr]">
+              <dt class="font-medium">Message</dt>
+              <dd class="text-sm leading-6 text-neutral-400">
+                A persisted Effect AI <code class="text-neutral-200">Prompt.Message</code>. Tool
+                calls and tool results remain first-class typed parts inside assistant/tool messages
+                and first-class streamed events.
+              </dd>
+            </div>
+            <div class="grid gap-2 px-5 py-4 md:grid-cols-[10rem_1fr]">
+              <dt class="font-medium">Safe boundary</dt>
+              <dd class="text-sm leading-6 text-neutral-400">
+                A point after the current model response and every emitted tool call has a persisted
+                result. Steering and tool-requested compaction are applied only here.
+              </dd>
+            </div>
+          </dl>
+        </div>
+        <div
+          class="mt-5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-4 text-sm leading-6 text-neutral-300"
+        >
+          Core invariants: one session actor and one model generation per session; append before
+          publish; tool call/result pairs never split; FIFO queue order; compaction swaps active
+          context atomically; every terminal path emits a settled or failed event.
+        </div>
+        <div
+          class="mt-3 rounded-lg border border-neutral-800 bg-neutral-900/40 p-4 text-sm leading-6 text-neutral-400"
+        >
+          <span class="text-neutral-200">Nominal typing rule.</span> Almost every domain value
+          crossing a module or persistence boundary is backed by a branded Schema: session, turn,
+          message, tool-call and pending-input IDs; ordinals; token counts and limits; timestamps;
+          provider/model keys; and compaction thresholds. Commands, events, phases, roles, and
+          statuses are closed tagged unions. Plain strings remain only for genuinely free-form
+          content such as user text and generated summaries.
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+          03 · Architecture
+        </p>
+        <div class="mt-7 grid items-stretch gap-3 lg:grid-cols-[1fr_auto_1fr_auto_1fr]">
+          <div class="rounded-xl border border-neutral-700 bg-neutral-900 p-5">
+            <span class="font-mono text-xs text-neutral-500">Stream&lt;SessionInput&gt;</span>
+            <h2 class="mt-2 font-medium">Session manager</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              Restores or creates a keyed actor, validates prompt/queue/steer commands, and feeds
+              its durable mailbox.
+            </p>
+          </div>
+          <div class="hidden items-center text-neutral-600 lg:flex">→</div>
+          <div class="rounded-xl border border-neutral-600 bg-neutral-50 p-5 text-neutral-950">
+            <span class="font-mono text-xs text-neutral-500">Scoped fiber</span>
+            <h2 class="mt-2 font-medium">Session loop</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-600">
+              Token check → compaction → model stream → tools → safe-boundary steering → queue
+              drain.
+            </p>
+          </div>
+          <div class="hidden items-center text-neutral-600 lg:flex">→</div>
+          <div class="rounded-xl border border-neutral-700 bg-neutral-900 p-5">
+            <span class="font-mono text-xs text-neutral-500">Stream&lt;SessionEvent&gt;</span>
+            <h2 class="mt-2 font-medium">Event bus</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              A bounded Effect PubSub broadcasts phase, message, Response part, compaction, queue,
+              turn, failure, and settled events with backpressure.
+            </p>
+          </div>
+        </div>
+        <div class="mt-3 grid gap-3 md:grid-cols-3">
+          <div class="rounded-xl border border-neutral-800 p-5">
+            <p class="text-xs uppercase tracking-wider text-neutral-500">AI services</p>
+            <p class="mt-2 text-sm text-neutral-300">
+              LanguageModel · Prompt · Response · Tool · Toolkit · Tokenizer · Model
+            </p>
+          </div>
+          <div class="rounded-xl border border-neutral-800 p-5">
+            <p class="text-xs uppercase tracking-wider text-neutral-500">Runtime primitives</p>
+            <p class="mt-2 text-sm text-neutral-300">
+              Stream · Queue · PubSub · Ref · Semaphore · Scope · LayerMap
+            </p>
+          </div>
+          <div class="rounded-xl border border-neutral-800 p-5">
+            <p class="text-xs uppercase tracking-wider text-neutral-500">Persistence</p>
+            <p class="mt-2 text-sm text-neutral-300">
+              @effect/sql-sqlite-node · SqlClient · SqlSchema · SqliteMigrator · Schema JSON codecs
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+          04 · Public surface
+        </p>
+        <div class="mt-6 grid gap-5 lg:grid-cols-2">
+          <div class="overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900">
+            <div class="border-b border-neutral-800 px-5 py-3 text-xs text-neutral-500">
+              Conceptual API — exact types finalized during implementation
+            </div>
+            <pre
+              class="overflow-x-auto p-5 font-mono text-xs leading-6 text-neutral-300"
+            ><code>AgentHarness.open(sessionId, options?)
+  → Effect&lt;AgentSession&gt;
+
+AgentSession.run(
+  input: Stream&lt;SessionInput&gt;
+) → Stream&lt;SessionEvent&gt;
+
+SessionInput =
+  | Prompt(userMessage)
+  | Queue(userMessage)
+  | Steer(userMessage)
+  | Stop</code></pre>
+          </div>
+          <div class="space-y-3">
+            <div class="rounded-xl border border-neutral-800 p-5">
+              <h2 class="font-medium">Input rules</h2>
+              <ul class="mt-3 space-y-2 text-sm leading-6 text-neutral-400">
+                <li><span class="text-neutral-200">Prompt</span> starts only while idle.</li>
+                <li>
+                  <span class="text-neutral-200">Queue</span> is durable FIFO and starts after the
+                  active turn; while idle it starts immediately.
+                </li>
+                <li>
+                  <span class="text-neutral-200">Steer</span> requires an active turn and is
+                  injected at the next safe boundary.
+                </li>
+              </ul>
+            </div>
+            <div class="rounded-xl border border-neutral-800 p-5">
+              <h2 class="font-medium">Instruction options</h2>
+              <p class="mt-2 text-sm leading-6 text-neutral-400">
+                An injected <code class="text-neutral-200">Instructions</code> service builds the
+                system prompt effectfully from session context. Provide constructors for plain text,
+                ordered sections, empty instructions, and fully custom builders.
+              </p>
+            </div>
+          </div>
+        </div>
+        <div class="mt-5 rounded-xl border border-neutral-800 p-5">
+          <h2 class="font-medium">Event contract</h2>
+          <p class="mt-2 text-sm leading-6 text-neutral-400">
+            Schema-defined tagged events: <code class="text-neutral-200">session-opened</code>,
+            <code class="text-neutral-200">input-accepted</code>,
+            <code class="text-neutral-200">phase-changed</code>,
+            <code class="text-neutral-200">turn-started</code>,
+            <code class="text-neutral-200">message-started</code>,
+            <code class="text-neutral-200">response-part</code>,
+            <code class="text-neutral-200">message-committed</code>,
+            <code class="text-neutral-200">queue-changed</code>,
+            <code class="text-neutral-200">compaction-started/completed</code>,
+            <code class="text-neutral-200">turn-completed</code>,
+            <code class="text-neutral-200">failed</code>, and
+            <code class="text-neutral-200">settled</code>. There is no snapshot API.
+          </p>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+          05 · Turn, steering, and queue flow
+        </p>
+        <div class="mt-7 overflow-x-auto pb-2">
+          <div class="flex min-w-[920px] items-center gap-2 text-center text-xs">
+            <div class="w-32 rounded-lg border border-neutral-800 p-4">
+              <span class="text-neutral-500">01</span><br />Persist user
+            </div>
+            <span class="text-neutral-700">→</span>
+            <div class="w-32 rounded-lg border border-neutral-800 p-4">
+              <span class="text-neutral-500">02</span><br />Token check
+            </div>
+            <span class="text-neutral-700">→</span>
+            <div class="w-32 rounded-lg border border-neutral-800 p-4">
+              <span class="text-neutral-500">03</span><br />Model stream
+            </div>
+            <span class="text-neutral-700">→</span>
+            <div class="w-32 rounded-lg border border-neutral-800 p-4">
+              <span class="text-neutral-500">04</span><br />Resolve tools
+            </div>
+            <span class="text-neutral-700">→</span>
+            <div
+              class="w-32 rounded-lg border border-neutral-50 bg-neutral-50 p-4 text-neutral-950"
+            >
+              <span class="text-neutral-500">05</span><br />Safe boundary
+            </div>
+            <span class="text-neutral-700">→</span>
+            <div class="w-36 rounded-lg border border-neutral-800 p-4">
+              <span class="text-neutral-500">06</span><br />Steer / continue / stop
+            </div>
+          </div>
+        </div>
+        <div class="mt-5 grid gap-4 md:grid-cols-2">
+          <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-5">
+            <h2 class="font-medium">Steering</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              A steer command sets a durable pending flag. The current Effect AI stream continues
+              through its current response and tool batch, so every tool call receives a result. At
+              the boundary, the steer user message is appended to the same turn and the next model
+              generation uses the updated context. Existing assistant output is retained.
+            </p>
+          </div>
+          <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-5">
+            <h2 class="font-medium">Queued messages</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              Queued messages never alter the active turn. Once the model stops with no further tool
+              work or steering, the turn is committed, the oldest queue item becomes a new turn, and
+              the automatic token check runs before that turn’s first model call.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+          06 · Tools and compaction
+        </p>
+        <div class="mt-6 grid gap-5 lg:grid-cols-[0.8fr_1.2fr]">
+          <div class="space-y-4">
+            <article class="rounded-xl border border-neutral-800 p-5">
+              <div class="flex items-center justify-between gap-4">
+                <h2 class="font-mono text-sm">execute</h2>
+                <span class="rounded-full bg-neutral-800 px-2 py-1 text-[11px] text-neutral-400"
+                  >stub</span
+                >
+              </div>
+              <p class="mt-3 text-sm leading-6 text-neutral-400">
+                A typed Effect AI tool accepting a command string and returning the stable generic
+                result <span class="text-neutral-200">“Not implemented yet.”</span> The handler is
+                isolated so execution can be replaced later.
+              </p>
+            </article>
+            <article class="rounded-xl border border-neutral-800 p-5">
+              <div class="flex items-center justify-between gap-4">
+                <h2 class="font-mono text-sm">compact</h2>
+                <span class="rounded-full bg-neutral-800 px-2 py-1 text-[11px] text-neutral-400"
+                  >control tool</span
+                >
+              </div>
+              <p class="mt-3 text-sm leading-6 text-neutral-400">
+                Returns an acknowledgement tool result and marks compaction pending. The session
+                loop performs compaction only after the tool batch reaches a safe boundary.
+              </p>
+            </article>
+          </div>
+          <div class="rounded-xl border border-neutral-700 bg-neutral-900 p-6">
+            <h2 class="font-medium">One compaction path for both triggers</h2>
+            <ol class="mt-5 space-y-4 text-sm leading-6 text-neutral-400">
+              <li class="grid grid-cols-[1.5rem_1fr] gap-3">
+                <span class="font-mono text-neutral-600">1</span
+                ><span
+                  >Trigger automatically immediately after a user message crosses the configurable
+                  threshold, or from the <code class="text-neutral-200">compact</code> tool at the
+                  next safe boundary.</span
+                >
+              </li>
+              <li class="grid grid-cols-[1.5rem_1fr] gap-3">
+                <span class="font-mono text-neutral-600">2</span
+                ><span
+                  >Locate the newest user message. Send only the active prefix before it to the
+                  injected compaction model, using a dedicated system instruction and no
+                  tools.</span
+                >
+              </li>
+              <li class="grid grid-cols-[1.5rem_1fr] gap-3">
+                <span class="font-mono text-neutral-600">3</span
+                ><span
+                  >Generate plain summary text through Effect AI. Wrap it as an ordinary user
+                  <code class="text-neutral-200">Prompt.Message</code>; prior summaries receive no
+                  special treatment on later compactions.</span
+                >
+              </li>
+              <li class="grid grid-cols-[1.5rem_1fr] gap-3">
+                <span class="font-mono text-neutral-600">4</span
+                ><span
+                  >In one SQLite transaction, append the summary and replace the active-context
+                  projection with <code class="text-neutral-200">[summary, newest user]</code>.
+                  Older rows and the compact-tool exchange remain archived for audit but leave model
+                  context.</span
+                >
+              </li>
+              <li class="grid grid-cols-[1.5rem_1fr] gap-3">
+                <span class="font-mono text-neutral-600">5</span
+                ><span
+                  >Resume the same turn with the main model. If summarization fails, retain the
+                  original active context and emit a typed failure—never leave a half-compacted
+                  session.</span
+                >
+              </li>
+            </ol>
+          </div>
+        </div>
+        <p class="mt-4 text-sm leading-6 text-neutral-500">
+          Token counting uses an injected Effect AI <code>Tokenizer</code> when available and a
+          configurable deterministic estimator fallback. Threshold, reserve, summary output limit,
+          and compaction model are options; none are provider constants.
+        </p>
+      </section>
+
+      <section class="border-t border-neutral-800 py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+          07 · Persistence model
+        </p>
+        <div class="mt-6 grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+          <div class="rounded-xl border border-neutral-800 p-4">
+            <h2 class="font-mono text-sm">sessions</h2>
+            <p class="mt-2 text-xs leading-5 text-neutral-500">
+              identity, timestamps, model key, configuration
+            </p>
+          </div>
+          <div class="rounded-xl border border-neutral-800 p-4">
+            <h2 class="font-mono text-sm">turns</h2>
+            <p class="mt-2 text-xs leading-5 text-neutral-500">
+              session, ordinal, state, start/end
+            </p>
+          </div>
+          <div class="rounded-xl border border-neutral-800 p-4">
+            <h2 class="font-mono text-sm">messages</h2>
+            <p class="mt-2 text-xs leading-5 text-neutral-500">
+              append order, Prompt JSON, streaming status
+            </p>
+          </div>
+          <div class="rounded-xl border border-neutral-800 p-4">
+            <h2 class="font-mono text-sm">context_messages</h2>
+            <p class="mt-2 text-xs leading-5 text-neutral-500">ordered active-context projection</p>
+          </div>
+          <div class="rounded-xl border border-neutral-800 p-4">
+            <h2 class="font-mono text-sm">pending_inputs</h2>
+            <p class="mt-2 text-xs leading-5 text-neutral-500">
+              durable queue/steer FIFO and claim state
+            </p>
+          </div>
+        </div>
+        <div class="mt-5 grid gap-4 lg:grid-cols-2">
+          <div
+            class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-5 text-sm leading-6 text-neutral-400"
+          >
+            <span class="text-neutral-200">Storage layer.</span> Define a provider-independent
+            <code class="text-neutral-200">SessionStore</code> Context service, then implement it
+            with <code class="text-neutral-200">@effect/sql-sqlite-node</code>, schema-decoded
+            queries, transactions, and <code class="text-neutral-200">SqliteMigrator</code>. An
+            in-memory layer supports deterministic tests.
+          </div>
+          <div
+            class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-5 text-sm leading-6 text-neutral-400"
+          >
+            <span class="text-neutral-200">Recovery.</span> Ensure
+            <code class="text-neutral-200">$HOME/.compass</code> through Effect FileSystem, use
+            SQLite WAL, reclaim pending inputs on open, and convert any persisted
+            <code class="text-neutral-200">streaming</code> message to
+            <code class="text-neutral-200">interrupted</code> while retaining coherent text/tool
+            parts.
+          </div>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+          08 · Module layout
+        </p>
+        <div class="mt-6 grid gap-6 lg:grid-cols-[1fr_1fr]">
+          <pre
+            class="overflow-x-auto rounded-xl border border-neutral-800 bg-neutral-900 p-5 font-mono text-xs leading-6 text-neutral-300"
+          ><code>packages/contracts/src/
+├── harness.ts
+└── index.ts                 # re-export harness
+
+apps/server/src/harness/
+├── index.ts
+├── AgentHarness.ts
+├── AgentSession.ts
+├── SessionStore.ts
+├── Instructions.ts
+├── Models.ts
+├── Tools.ts
+├── Compaction.ts
+├── internal/
+│   ├── SessionLoop.ts
+│   ├── EventBus.ts
+│   └── TokenCounter.ts
+├── persistence/
+│   ├── SqliteSessionStore.ts
+│   └── migrations.ts
+├── providers/
+│   └── OpenRouter.ts
+└── test/
+    ├── FakeLanguageModel.ts
+    └── *.test.ts</code></pre>
+          <div class="space-y-3 text-sm leading-6 text-neutral-400">
+            <p>
+              <span class="text-neutral-200">packages/contracts/src/harness.ts</span> is the single
+              home for all shared harness Schema classes, branded identifiers, commands, events,
+              persisted data shapes, options, and tagged errors. It uses branded schemas by default
+              for semantically distinct primitives, and the contracts index re-exports the module.
+            </p>
+            <p>
+              <span class="text-neutral-200">Server modules</span> import those contracts and own
+              only Effect services, Layers, orchestration, provider adapters, and persistence
+              implementations. They do not redefine public types or errors.
+            </p>
+            <p>
+              <span class="text-neutral-200">AgentSession</span> owns only orchestration. Storage,
+              instructions, models, token counting, and compaction remain injected services.
+            </p>
+            <p>
+              <span class="text-neutral-200">Models</span> exposes conversation and compaction model
+              services as captured Effect AI <code>Model</code> layers. A later provider adapter
+              plugs in without changing the loop.
+            </p>
+            <p>
+              <span class="text-neutral-200">OpenRouter</span> composes
+              <code>@effect/ai-openrouter</code>, <code>FetchHttpClient</code>, redacted
+              configuration, and the caller-selected model key.
+            </p>
+            <p>
+              <span class="text-neutral-200">index.ts</span> exports the supported harness API and
+              keeps internal machinery private.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+          09 · Implementation sequence
+        </p>
+        <ol
+          class="mt-7 grid gap-px overflow-hidden rounded-xl border border-neutral-800 bg-neutral-800 md:grid-cols-2"
+        >
+          <li class="bg-neutral-950 p-6">
+            <span class="font-mono text-xs text-neutral-600">01</span>
+            <h2 class="mt-2 font-medium">Contracts and services</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              Define every harness schema, branded domain value, option, command/event, and error in
+              <code class="text-neutral-200">packages/contracts/src/harness.ts</code>; re-export it,
+              then add server-only service interfaces and Layers.
+            </p>
+          </li>
+          <li class="bg-neutral-950 p-6">
+            <span class="font-mono text-xs text-neutral-600">02</span>
+            <h2 class="mt-2 font-medium">Persistence</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              Build SessionStore, in-memory layer, SQLite migrations/layer, active-context
+              projection, and recovery behavior.
+            </p>
+          </li>
+          <li class="bg-neutral-950 p-6">
+            <span class="font-mono text-xs text-neutral-600">03</span>
+            <h2 class="mt-2 font-medium">AI primitives</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              Create execute/compact Tool definitions, Toolkit handlers, token counter, compaction
+              prompt, and OpenRouter adapter.
+            </p>
+          </li>
+          <li class="bg-neutral-950 p-6">
+            <span class="font-mono text-xs text-neutral-600">04</span>
+            <h2 class="mt-2 font-medium">Session actor</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              Implement scoped command ingestion, keyed single-flight lifetime, streamed
+              response/event handling, tool loop, steering, and queue drain.
+            </p>
+          </li>
+          <li class="bg-neutral-950 p-6">
+            <span class="font-mono text-xs text-neutral-600">05</span>
+            <h2 class="mt-2 font-medium">Compaction transaction</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              Unify automatic and tool triggers, exclude the newest user message, atomically replace
+              context, and resume generation.
+            </p>
+          </li>
+          <li class="bg-neutral-950 p-6">
+            <span class="font-mono text-xs text-neutral-600">06</span>
+            <h2 class="mt-2 font-medium">Verification and polish</h2>
+            <p class="mt-2 text-sm leading-6 text-neutral-400">
+              Complete fake-model and SQLite suites, document exports/configuration, then run
+              repository-required checks.
+            </p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="border-t border-neutral-800 py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+          10 · Test matrix
+        </p>
+        <div class="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Schema/brand round-trips and invalid persisted data
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            One active generation under concurrent input
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            FIFO queued turns and durable reload
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Steer waits for all tool results
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Partial assistant text retained on steer
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Execute stub call/result persistence
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Threshold check precedes first model call
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Compact tool waits for safe boundary
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Summary excludes newest user message
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Repeated summaries treated as user input
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Failed compaction rolls back context swap
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Restart recovery of pending/interrupted state
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Slow subscribers obey event backpressure
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            Instruction builder and model injection
+          </div>
+          <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+            OpenRouter layer composes without network calls
+          </div>
+        </div>
+        <p class="mt-4 text-sm text-neutral-500">
+          Use <code>@effect/vitest</code>, Effect TestClock where timing matters, scripted
+          <code>LanguageModel.make</code> streams, the in-memory store for loop tests, and temporary
+          SQLite databases for integration tests. No test calls a real LLM.
+        </p>
+      </section>
+
+      <section class="border-y border-neutral-800 py-12">
+        <p class="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+          11 · Acceptance gate
+        </p>
+        <div class="mt-6 grid gap-4 md:grid-cols-2">
+          <div class="rounded-xl bg-neutral-50 p-6 text-neutral-950">
+            <p class="font-mono text-sm">vp run ready</p>
+            <p class="mt-2 text-sm text-neutral-600">
+              Formatting/lint checks, all tests, and all builds pass.
+            </p>
+          </div>
+          <div class="rounded-xl border border-neutral-700 p-6">
+            <p class="font-mono text-sm">vp run typecheck</p>
+            <p class="mt-2 text-sm text-neutral-400">
+              Effect-aware diagnostics pass for the monorepo with no suppressed harness errors.
+            </p>
+          </div>
+        </div>
+        <ul class="mt-6 grid gap-2 text-sm leading-6 text-neutral-400 md:grid-cols-2">
+          <li>✓ No hard-coded provider or model in the core</li>
+          <li>✓ No network-dependent tests</li>
+          <li>✓ No incomplete tool state on steering</li>
+          <li>✓ No non-atomic context replacement</li>
+          <li>✓ No snapshot API; state is event-streamed</li>
+          <li>✓ No server-local public types or errors</li>
+          <li>✓ Semantically distinct primitives are branded</li>
+        </ul>
+      </section>
+
+      <footer
+        class="flex flex-col gap-3 py-8 text-xs text-neutral-600 sm:flex-row sm:items-center sm:justify-between"
+      >
+        <p>
+          Prepared from the current Compass worktree, vendored Effect v4 source, and pi agent
+          harness reference.
+        </p>
+        <p class="font-mono">.plans/01-agent-harness.html</p>
+      </footer>
+    </main>
+  </body>
+</html>

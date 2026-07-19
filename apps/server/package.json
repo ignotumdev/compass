@@ -9,6 +9,12 @@
   },
   "dependencies": {
     "@compass/contracts": "workspace:*",
+    "@effect/ai-openrouter": "catalog:",
+    "@effect/platform-node": "catalog:",
+    "@effect/sql-sqlite-node": "catalog:",
     "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:"
   }
 }
