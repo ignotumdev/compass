@@ -1,0 +1,16 @@
+{
+  "title": "Community Adapters",
+  "pages": [
+    "---Platforms---",
+    "webex",
+    "baileys",
+    "blooio",
+    "zalo",
+    "mattermost",
+    "weixin",
+    "zaileys",
+    "---State---",
+    "cloudflare-do",
+    "mysql"
+  ]
+}
