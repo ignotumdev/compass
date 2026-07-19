@@ -1,6 +1,6 @@
 import {
   type MessageId,
-  MessageId as MessageIdSchema,
+  ModelGenerationOptions,
   SessionCompactionError,
   type StoredMessage,
   StoredMessage as StoredMessageSchema,
@@ -12,7 +12,7 @@ import { Context, Crypto, Effect, Layer, Schema } from "effect";
 import { LanguageModel, Prompt } from "effect/unstable/ai";
 import { CompactionModel } from "./Models.ts";
 import { SessionStore } from "./SessionStore.ts";
-import { now } from "./internal/Ids.ts";
+import { makeMessageId, now } from "./internal/Ids.ts";
 
 const SUMMARY_SYSTEM_INSTRUCTIONS = `You compact agent conversation history.
 Produce a concise but complete working summary of the supplied history.
@@ -21,6 +21,27 @@ Do not address the user and do not invent facts.`;
 
 const serializeMessages = (messages: ReadonlyArray<StoredMessage>) =>
   JSON.stringify(messages.map((stored) => Schema.encodeSync(Prompt.Message)(stored.message)));
+
+/**
+ * Effect AI deliberately keeps provider generation settings out of the shared
+ * LanguageModel request. Enforce the session limit before persistence using
+ * the same conservative UTF-8 estimate as the token counter fallback.
+ */
+export const limitSummaryText = (text: string, maxTokens: number): string => {
+  const encoder = new TextEncoder();
+  const maximumBytes = maxTokens * 4;
+  if (encoder.encode(text).byteLength <= maximumBytes) return text;
+
+  const characters: Array<string> = [];
+  let bytes = 0;
+  for (const character of text) {
+    const characterBytes = encoder.encode(character).byteLength;
+    if (bytes + characterBytes > maximumBytes) break;
+    characters.push(character);
+    bytes += characterBytes;
+  }
+  return characters.join("").trimEnd();
+};
 
 export class Compactor extends Context.Service<
   Compactor,
@@ -70,7 +91,7 @@ export class Compactor extends Context.Service<
             });
           }
 
-          const response = yield* languageModel.generateText({
+          const generation = languageModel.generateText({
             prompt: Prompt.fromMessages([
               Prompt.makeMessage("system", {
                 content: SUMMARY_SYSTEM_INSTRUCTIONS,
@@ -85,8 +106,21 @@ export class Compactor extends Context.Service<
             ]),
             toolChoice: "none",
           });
+          const generationWithLimit =
+            binding.transformGeneration === undefined
+              ? generation
+              : binding.transformGeneration(
+                  generation,
+                  new ModelGenerationOptions({
+                    maxOutputTokens: session.configuration.summaryMaxTokens,
+                  }),
+                );
+          const response = yield* generationWithLimit;
 
-          const summaryText = response.text.trim();
+          const summaryText = limitSummaryText(
+            response.text.trim(),
+            session.configuration.summaryMaxTokens,
+          );
           if (summaryText.length === 0) {
             return yield* new SessionCompactionError({
               sessionId: session.id,
@@ -96,7 +130,7 @@ export class Compactor extends Context.Service<
           }
 
           const [id, sequence, timestamp] = yield* Effect.all([
-            Effect.map(crypto.randomUUIDv7, (value) => MessageIdSchema.make(value)),
+            makeMessageId(crypto),
             store.nextMessageSequence(session.id),
             now,
           ]);

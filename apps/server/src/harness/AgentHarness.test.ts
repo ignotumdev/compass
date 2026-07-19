@@ -1,5 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
-import { ModelKey, PromptInput, ProviderKey, TokenLimit } from "@compass/contracts";
+import {
+  type HarnessModelBinding,
+  ModelKey,
+  PromptInput,
+  ProviderKey,
+  TokenLimit,
+} from "@compass/contracts";
 import { Context, Effect, Layer, Stream } from "effect";
 import { LanguageModel, Prompt, type Response } from "effect/unstable/ai";
 import { AgentHarness } from "./AgentHarness.ts";
@@ -38,6 +44,7 @@ describe("AgentHarness", () => {
       Effect.gen(function* () {
         const conversationPrompts: Array<Prompt.Prompt> = [];
         const compactionPrompts: Array<Prompt.Prompt> = [];
+        const compactionLimits: Array<TokenLimit> = [];
         let responseNumber = 0;
         const modelLayer = Layer.effect(
           LanguageModel.LanguageModel,
@@ -65,10 +72,14 @@ describe("AgentHarness", () => {
             },
           }),
         );
-        const binding = {
+        const binding: HarnessModelBinding = {
           provider: ProviderKey.make("test"),
           model: ModelKey.make("scripted"),
           layer: modelLayer,
+          transformGeneration: (effect, options) => {
+            compactionLimits.push(options.maxOutputTokens);
+            return effect;
+          },
         };
         const models = Layer.merge(
           ConversationModel.layer(binding),
@@ -80,15 +91,23 @@ describe("AgentHarness", () => {
         const harness = Context.get(context, AgentHarness);
         const session = yield* harness.create({
           compactAtTokens: TokenLimit.make(1),
+          summaryMaxTokens: TokenLimit.make(16),
         });
+        const unsupportedBinding = yield* Effect.flip(
+          harness.create({ provider: ProviderKey.make("not-installed") }),
+        );
+        expect(unsupportedBinding._tag).toBe("SessionConfigurationError");
 
         yield* session.offer(new PromptInput({ message: userMessage("first request") }));
         yield* session.waitForIdle;
+        const duplicate = yield* Effect.flip(harness.create({ id: session.id }));
+        expect(duplicate._tag).toBe("SessionPersistenceError");
         yield* session.offer(new PromptInput({ message: userMessage("latest request") }));
         yield* session.waitForIdle;
 
         const secondPrompt = conversationPrompts[1];
         expect(compactionPrompts).toHaveLength(1);
+        expect(compactionLimits).toEqual([16]);
         expect(secondPrompt).toBeDefined();
         expect(
           secondPrompt?.content.some((message) =>

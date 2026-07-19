@@ -1,5 +1,5 @@
-import { type Layer, Schema } from "effect";
-import { LanguageModel, Prompt } from "effect/unstable/ai";
+import { type Effect, type Layer, Schema } from "effect";
+import { LanguageModel, Prompt, Response, Tool, Toolkit } from "effect/unstable/ai";
 
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1));
 const NonNegativeInteger = Schema.Finite.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
@@ -97,11 +97,41 @@ export class SqliteSessionStoreOptions extends Schema.Class<SqliteSessionStoreOp
   "@compass/contracts/harness/SqliteSessionStoreOptions",
 )({ filename: DatabaseFilename }) {}
 
+export class ModelGenerationOptions extends Schema.Class<ModelGenerationOptions>(
+  "@compass/contracts/harness/ModelGenerationOptions",
+)({ maxOutputTokens: TokenLimit }) {}
+
 export interface HarnessModelBinding {
   readonly provider: ProviderKey;
   readonly model: ModelKey;
   readonly layer: Layer.Layer<LanguageModel.LanguageModel>;
+  readonly transformGeneration?: <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+    options: ModelGenerationOptions,
+  ) => Effect.Effect<A, E, R>;
 }
+
+export const ExecuteTool = Tool.make("execute", {
+  description: "Execute a command in the Compass environment.",
+  parameters: Schema.Struct({
+    command: Schema.String.annotate({
+      description: "The command to execute.",
+    }),
+  }),
+  success: Schema.String,
+});
+
+export const CompactTool = Tool.make("compact", {
+  description:
+    "Compact the conversation history when the context is too large or a fresh summary would help.",
+  parameters: Schema.Struct({}),
+  success: Schema.String,
+});
+
+export const HarnessToolkit = Toolkit.make(ExecuteTool, CompactTool);
+
+export const HarnessResponsePart = Response.AllParts(HarnessToolkit);
+export type HarnessResponsePart = typeof HarnessResponsePart.Type;
 
 export class PromptInput extends Schema.TaggedClass<PromptInput>()("Prompt", {
   message: Prompt.UserMessage,
@@ -191,7 +221,7 @@ export class ResponsePartEvent extends Schema.TaggedClass<ResponsePartEvent>()("
   sessionId: SessionId,
   turnId: TurnId,
   messageId: MessageId,
-  part: Schema.Unknown,
+  part: HarnessResponsePart,
 }) {}
 
 export class MessageCommitted extends Schema.TaggedClass<MessageCommitted>()("MessageCommitted", {
@@ -272,6 +302,15 @@ export class SessionPersistenceError extends Schema.TaggedErrorClass<SessionPers
   { operation: NonEmptyString, message: Schema.String, cause: Schema.Defect() },
 ) {}
 
+export class SessionConfigurationError extends Schema.TaggedErrorClass<SessionConfigurationError>()(
+  "SessionConfigurationError",
+  {
+    provider: ProviderKey,
+    model: ModelKey,
+    message: Schema.String,
+  },
+) {}
+
 export class SessionCompactionError extends Schema.TaggedErrorClass<SessionCompactionError>()(
   "SessionCompactionError",
   { sessionId: SessionId, message: Schema.String, cause: Schema.Defect() },
@@ -286,6 +325,7 @@ export type HarnessError =
   | SessionNotFoundError
   | SessionBusyError
   | InvalidSessionStateError
+  | SessionConfigurationError
   | SessionPersistenceError
   | SessionCompactionError
   | SessionModelError;

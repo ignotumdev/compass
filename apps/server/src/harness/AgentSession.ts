@@ -5,9 +5,7 @@ import {
   InputAccepted,
   InvalidSessionStateError,
   MessageCommitted,
-  MessageId,
   MessageStarted,
-  PendingInputId,
   PhaseChanged,
   QueueChanged,
   ResponsePartEvent,
@@ -27,7 +25,7 @@ import {
   StoredTurn,
   type TokenCount,
   TurnCompleted,
-  TurnId,
+  type TurnId,
   TurnStarted,
 } from "@compass/contracts";
 import {
@@ -50,8 +48,14 @@ import { Instructions } from "./Instructions.ts";
 import { ConversationModel } from "./Models.ts";
 import { SessionStore } from "./SessionStore.ts";
 import { makeToolkit } from "./Tools.ts";
-import { now, tokenCount } from "./internal/Ids.ts";
+import { makeMessageId, makePendingInputId, makeTurnId, now, tokenCount } from "./internal/Ids.ts";
 import { TokenCounter } from "./internal/TokenCounter.ts";
+
+interface GenerationGate {
+  readonly signal: Deferred.Deferred<void>;
+  readonly openToolCalls: ReadonlySet<string>;
+  readonly requested: boolean;
+}
 
 export class AgentSession extends Context.Service<
   AgentSession,
@@ -81,7 +85,9 @@ export class AgentSession extends Context.Service<
         const idleSignal = yield* Ref.make(initiallyIdle);
         const stopRequested = yield* Ref.make(false);
         const recoveredPending = yield* store.pendingCounts(session.id);
+        const recoveredActiveTurn = yield* store.activeTurn(session.id);
         const steerRequested = yield* Ref.make(recoveredPending.steer > 0);
+        const generationGate = yield* Ref.make<Option.Option<GenerationGate>>(Option.none());
         const wake = yield* Queue.sliding<void>(1);
         const eventBus = yield* PubSub.bounded<SessionEvent>({
           capacity: session.configuration.eventBufferSize,
@@ -126,6 +132,109 @@ export class AgentSession extends Context.Service<
             cause,
           });
 
+        const requestGenerationInterrupt = Effect.fn("AgentSession.requestGenerationInterrupt")(
+          function* () {
+            const signal = yield* Ref.modify(generationGate, (current) =>
+              Option.match(current, {
+                onNone: () => [Option.none<Deferred.Deferred<void>>(), current] as const,
+                onSome: (gate) => {
+                  const next = Option.some({ ...gate, requested: true });
+                  return [
+                    gate.openToolCalls.size === 0 ? Option.some(gate.signal) : Option.none(),
+                    next,
+                  ] as const;
+                },
+              }),
+            );
+            if (Option.isSome(signal)) yield* Deferred.succeed(signal.value, undefined);
+          },
+        );
+
+        const trackToolCall = (part: Response.AnyPart) =>
+          part.type !== "tool-call"
+            ? Effect.void
+            : Ref.update(generationGate, (current) =>
+                Option.map(current, (gate) => ({
+                  ...gate,
+                  openToolCalls: new Set(gate.openToolCalls).add(part.id),
+                })),
+              );
+
+        const shouldStopAfterPart = Effect.fn("AgentSession.shouldStopAfterPart")(function* (
+          part: Response.AnyPart,
+        ) {
+          if (part.type !== "tool-result" || part.preliminary === true) return false;
+          const current = yield* Ref.get(generationGate);
+          if (Option.isNone(current) || !current.value.requested) return false;
+          const remaining = new Set(current.value.openToolCalls);
+          remaining.delete(part.id);
+          return remaining.size === 0;
+        });
+
+        const finishGenerationPart = Effect.fn("AgentSession.finishGenerationPart")(function* (
+          part: Response.AnyPart,
+        ) {
+          if (part.type !== "tool-result" || part.preliminary === true) return;
+          const signal = yield* Ref.modify(generationGate, (current) =>
+            Option.match(current, {
+              onNone: () => [Option.none<Deferred.Deferred<void>>(), current] as const,
+              onSome: (gate) => {
+                const openToolCalls = new Set(gate.openToolCalls);
+                openToolCalls.delete(part.id);
+                return [
+                  gate.requested && openToolCalls.size === 0
+                    ? Option.some(gate.signal)
+                    : Option.none(),
+                  Option.some({ ...gate, openToolCalls }),
+                ] as const;
+              },
+            }),
+          );
+          if (Option.isSome(signal)) yield* Deferred.succeed(signal.value, undefined);
+        });
+
+        const makeStoredMessage = Effect.fn("AgentSession.makeStoredMessage")(function* (
+          turnId: TurnId,
+          message: Prompt.Message,
+          requestedId?: StoredMessage["id"],
+        ) {
+          const [messageId, sequence, timestamp] = yield* Effect.all([
+            requestedId === undefined ? makeMessageId(crypto) : Effect.succeed(requestedId),
+            store.nextMessageSequence(session.id),
+            now,
+          ]);
+          return new StoredMessage({
+            id: messageId,
+            sessionId: session.id,
+            turnId,
+            sequence,
+            message,
+            status: "complete",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          });
+        });
+
+        const publishMessageStarted = (stored: StoredMessage) =>
+          publish(
+            new MessageStarted({
+              sessionId: session.id,
+              turnId: stored.turnId,
+              messageId: stored.id,
+              role: stored.message.role,
+            }),
+          );
+
+        const publishMessageCommitted = (stored: StoredMessage) =>
+          publish(
+            new MessageCommitted({
+              sessionId: session.id,
+              turnId: stored.turnId,
+              messageId: stored.id,
+              role: stored.message.role,
+            }),
+          );
+
         const appendMessage = Effect.fn("AgentSession.appendMessage")(
           function* (
             turnId: TurnId,
@@ -135,42 +244,12 @@ export class AgentSession extends Context.Service<
               readonly alreadyStarted?: boolean;
             },
           ) {
-            const [id, sequence, timestamp] = yield* Effect.all([
-              options?.id === undefined
-                ? Effect.map(crypto.randomUUIDv7, (value) => MessageId.make(value))
-                : Effect.succeed(options.id),
-              store.nextMessageSequence(session.id),
-              now,
-            ]);
-            const stored = new StoredMessage({
-              id,
-              sessionId: session.id,
-              turnId,
-              sequence,
-              message,
-              status: "complete",
-              createdAt: timestamp,
-              updatedAt: timestamp,
-            });
+            const stored = yield* makeStoredMessage(turnId, message, options?.id);
             if (options?.alreadyStarted !== true) {
-              yield* publish(
-                new MessageStarted({
-                  sessionId: session.id,
-                  turnId,
-                  messageId: id,
-                  role: message.role,
-                }),
-              );
+              yield* publishMessageStarted(stored);
             }
             yield* store.appendMessage(stored, true);
-            yield* publish(
-              new MessageCommitted({
-                sessionId: session.id,
-                turnId,
-                messageId: id,
-                role: message.role,
-              }),
-            );
+            yield* publishMessageCommitted(stored);
             return stored;
           },
           Effect.mapError((cause) =>
@@ -267,10 +346,23 @@ export class AgentSession extends Context.Service<
             const prompt = yield* buildPrompt(active);
             const compactionRequested = yield* Ref.make(false);
             const toolkit = yield* makeToolkit(compactionRequested);
-            const openToolCalls = yield* Ref.make(new Set<string>());
-            const assistantMessageId = yield* crypto.randomUUIDv7.pipe(
-              Effect.map((value) => MessageId.make(value)),
+            const interruptSignal = yield* Deferred.make<void>();
+            yield* submitSemaphore.withPermits(1)(
+              Effect.gen(function* () {
+                const requested =
+                  (yield* Ref.get(steerRequested)) || (yield* Ref.get(stopRequested));
+                yield* Ref.set(
+                  generationGate,
+                  Option.some({
+                    signal: interruptSignal,
+                    openToolCalls: new Set<string>(),
+                    requested,
+                  }),
+                );
+                if (requested) yield* Deferred.succeed(interruptSignal, undefined);
+              }),
             );
+            const assistantMessageId = yield* makeMessageId(crypto);
             yield* publish(
               new MessageStarted({
                 sessionId: session.id,
@@ -280,49 +372,39 @@ export class AgentSession extends Context.Service<
               }),
             );
             const parts = yield* languageModel.streamText({ prompt, toolkit }).pipe(
+              Stream.tap(trackToolCall),
+              Stream.takeUntilEffect(shouldStopAfterPart),
+              Stream.interruptWhen(Deferred.await(interruptSignal)),
               Stream.tap((part) =>
-                publish(
-                  new ResponsePartEvent({
-                    sessionId: session.id,
-                    turnId,
-                    messageId: assistantMessageId,
-                    part,
-                  }),
+                finishGenerationPart(part).pipe(
+                  Effect.andThen(
+                    publish(
+                      new ResponsePartEvent({
+                        sessionId: session.id,
+                        turnId,
+                        messageId: assistantMessageId,
+                        part,
+                      }),
+                    ),
+                  ),
                 ),
-              ),
-              Stream.takeUntilEffect((part) =>
-                Effect.gen(function* () {
-                  if (part.type === "tool-call") {
-                    yield* Ref.update(openToolCalls, (current) => new Set(current).add(part.id));
-                  } else if (part.type === "tool-result" && part.preliminary !== true) {
-                    yield* Ref.update(openToolCalls, (current) => {
-                      const next = new Set(current);
-                      next.delete(part.id);
-                      return next;
-                    });
-                  }
-                  const interruptRequested =
-                    (yield* Ref.get(steerRequested)) || (yield* Ref.get(stopRequested));
-                  if (!interruptRequested) return false;
-                  if ((yield* Ref.get(openToolCalls)).size > 0) return false;
-                  return (
-                    part.type === "text-delta" ||
-                    part.type === "text-end" ||
-                    part.type === "reasoning-delta" ||
-                    part.type === "reasoning-end" ||
-                    part.type === "tool-result" ||
-                    part.type === "finish"
-                  );
-                }),
               ),
               Stream.runCollect,
               Effect.map((chunk) => preservePartialContent(Array.from(chunk))),
+              Effect.ensuring(
+                Ref.update(generationGate, (current) =>
+                  Option.filter(current, (gate) => gate.signal !== interruptSignal),
+                ),
+              ),
             );
             yield* setPhase("resolving-tools");
             yield* persistResponse(turnId, parts, assistantMessageId);
             return {
               compact: yield* Ref.get(compactionRequested),
               hasToolCalls: parts.some((part) => part.type === "tool-call"),
+              hasNonCompactToolCalls: parts.some(
+                (part) => part.type === "tool-call" && part.name !== "compact",
+              ),
             };
           },
           (effect) =>
@@ -337,11 +419,81 @@ export class AgentSession extends Context.Service<
             ),
         );
 
+        const appendPendingInput = Effect.fn("AgentSession.appendPendingInput")(
+          function* (turnId: TurnId, pending: StoredPendingInput) {
+            const stored = yield* makeStoredMessage(turnId, pending.message);
+            yield* publishMessageStarted(stored);
+            yield* store.appendPendingMessage(pending.id, stored);
+            yield* publishMessageCommitted(stored);
+            return stored;
+          },
+          Effect.mapError((cause) =>
+            Schema.is(SessionPersistenceError)(cause)
+              ? cause
+              : platformFailure("append a pending session message", cause),
+          ),
+        );
+
+        const continueTurn = Effect.fn("AgentSession.continueTurn")(
+          function* (turnId: TurnId, initialLatestUser: StoredMessage) {
+            let latestUser = initialLatestUser;
+            yield* maybeCompact(latestUser.id, turnId);
+
+            let running = true;
+            while (running) {
+              const result = yield* generate(turnId);
+              if (yield* Ref.get(stopRequested)) {
+                let discardedSteer = yield* store.peekPending(session.id, "steer");
+                while (Option.isSome(discardedSteer)) {
+                  yield* store.removePending(discardedSteer.value.id);
+                  discardedSteer = yield* store.peekPending(session.id, "steer");
+                }
+                yield* Ref.set(steerRequested, false);
+                yield* publishQueue();
+                running = false;
+                continue;
+              }
+              const steering = yield* store.peekPending(session.id, "steer");
+              if (Option.isSome(steering)) {
+                latestUser = yield* appendPendingInput(turnId, steering.value);
+                const pendingAfterSteer = yield* store.pendingCounts(session.id);
+                yield* Ref.set(steerRequested, pendingAfterSteer.steer > 0);
+                yield* publishQueue();
+                yield* maybeCompact(latestUser.id, turnId);
+                continue;
+              }
+              yield* Ref.set(steerRequested, false);
+              yield* publishQueue();
+              if (result.compact) {
+                const active = yield* store.activeMessages(session.id);
+                const latestIndex = active.findIndex((message) => message.id === latestUser.id);
+                if (latestIndex > 0) {
+                  const tokens = yield* counter.count(yield* buildPrompt(active));
+                  yield* runCompaction(active, latestUser.id, turnId, tokens);
+                  continue;
+                }
+                if (!result.hasNonCompactToolCalls) {
+                  running = false;
+                  continue;
+                }
+              }
+              if (result.hasToolCalls) continue;
+              running = false;
+            }
+
+            yield* setPhase("settling");
+            const stopped = yield* Ref.getAndSet(stopRequested, false);
+            yield* store.updateTurnStatus(turnId, stopped ? "interrupted" : "completed");
+            yield* publish(new TurnCompleted({ sessionId: session.id, turnId }));
+          },
+          (effect, turnId) =>
+            Effect.onError(effect, () =>
+              store.updateTurnStatus(turnId, "failed").pipe(Effect.ignore),
+            ),
+        );
+
         const runTurn = Effect.fn("AgentSession.runTurn")(function* (pending: StoredPendingInput) {
-          const [turnId, timestamp] = yield* Effect.all([
-            Effect.map(crypto.randomUUIDv7, (value) => TurnId.make(value)),
-            now,
-          ]);
+          const [turnId, timestamp] = yield* Effect.all([makeTurnId(crypto), now]);
           const turn = new StoredTurn({
             id: turnId,
             sessionId: session.id,
@@ -349,59 +501,61 @@ export class AgentSession extends Context.Service<
             createdAt: timestamp,
             updatedAt: timestamp,
           });
-          yield* store.createTurn(turn);
-          yield* publish(new TurnStarted({ sessionId: session.id, turnId }));
-          let latestUser = yield* appendMessage(turnId, pending.message);
-          yield* maybeCompact(latestUser.id, turnId);
-
-          let running = true;
-          while (running) {
-            const result = yield* generate(turnId);
-            if (yield* Ref.get(stopRequested)) {
-              let discardedSteer = yield* store.takePending(session.id, "steer");
-              while (Option.isSome(discardedSteer)) {
-                discardedSteer = yield* store.takePending(session.id, "steer");
-              }
-              yield* Ref.set(steerRequested, false);
-              yield* publishQueue();
-              running = false;
-              continue;
-            }
-            const steering = yield* store.takePending(session.id, "steer");
-            const pendingAfterSteer = yield* store.pendingCounts(session.id);
-            yield* Ref.set(steerRequested, pendingAfterSteer.steer > 0);
-            yield* publishQueue();
-            if (Option.isSome(steering)) {
-              latestUser = yield* appendMessage(turnId, steering.value.message);
-              yield* maybeCompact(latestUser.id, turnId);
-              continue;
-            }
-            if (result.compact) {
-              const active = yield* store.activeMessages(session.id);
-              const latestIndex = active.findIndex((message) => message.id === latestUser.id);
-              if (latestIndex > 0) {
-                const tokens = yield* counter.count(yield* buildPrompt(active));
-                yield* runCompaction(active, latestUser.id, turnId, tokens);
-              }
-              continue;
-            }
-            if (result.hasToolCalls) continue;
-            running = false;
+          const latestUser = yield* makeStoredMessage(turnId, pending.message);
+          yield* store.beginTurn(pending.id, turn, latestUser);
+          if (pending.kind === "steer") {
+            const remaining = yield* store.pendingCounts(session.id);
+            yield* Ref.set(steerRequested, remaining.steer > 0);
           }
-
-          yield* setPhase("settling");
-          const stopped = yield* Ref.getAndSet(stopRequested, false);
-          yield* store.updateTurnStatus(turnId, stopped ? "interrupted" : "completed");
-          yield* publish(new TurnCompleted({ sessionId: session.id, turnId }));
+          yield* publish(new TurnStarted({ sessionId: session.id, turnId }));
+          yield* publishMessageStarted(latestUser);
+          yield* publishMessageCommitted(latestUser);
+          yield* continueTurn(turnId, latestUser);
         });
+
+        const resumeTurn = Effect.fn("AgentSession.resumeTurn")(
+          function* (turn: StoredTurn) {
+            yield* publish(new TurnStarted({ sessionId: session.id, turnId: turn.id }));
+            const active = yield* store.activeMessages(session.id);
+            let latestUser: StoredMessage | undefined;
+            for (let index = active.length - 1; index >= 0; index -= 1) {
+              const message = active[index]!;
+              if (message.turnId === turn.id && message.message.role === "user") {
+                latestUser = message;
+                break;
+              }
+            }
+            if (latestUser === undefined) {
+              return yield* new InvalidSessionStateError({
+                sessionId: session.id,
+                phase: yield* Ref.get(phase),
+                message: `Cannot recover active turn ${turn.id} without a user message`,
+              });
+            }
+            yield* continueTurn(turn.id, latestUser);
+          },
+          (effect, turn) =>
+            Effect.onError(effect, () =>
+              store.updateTurnStatus(turn.id, "failed").pipe(Effect.ignore),
+            ),
+        );
 
         const drain = Effect.fn("AgentSession.drain")(
           function* () {
-            let next = yield* store.takePending(session.id, "queue");
+            const activeTurn = yield* store.activeTurn(session.id);
+            if (Option.isSome(activeTurn)) yield* resumeTurn(activeTurn.value);
+
+            const recoveredSteer = yield* store.peekPending(session.id, "steer");
+            if (Option.isSome(recoveredSteer)) {
+              yield* publishQueue();
+              yield* runTurn(recoveredSteer.value);
+            }
+
+            let next = yield* store.peekPending(session.id, "queue");
             while (Option.isSome(next)) {
               yield* publishQueue();
               yield* runTurn(next.value);
-              next = yield* store.takePending(session.id, "queue");
+              next = yield* store.peekPending(session.id, "queue");
             }
             yield* setPhase("idle");
             yield* publish(new SessionSettled({ sessionId: session.id }));
@@ -424,10 +578,6 @@ export class AgentSession extends Context.Service<
         );
 
         const driver = Queue.take(wake).pipe(Effect.andThen(drain()), Effect.forever);
-        yield* Effect.forkScoped(driver);
-        if (recoveredPending.queue > 0 || recoveredPending.steer > 0) {
-          yield* Queue.offer(wake, undefined);
-        }
 
         const offer = Effect.fn("AgentSession.offer")(
           function* (input: SessionInput) {
@@ -451,6 +601,7 @@ export class AgentSession extends Context.Service<
             }
             if (input._tag === "Stop") {
               yield* Ref.set(stopRequested, true);
+              yield* requestGenerationInterrupt();
               yield* publish(
                 new InputAccepted({
                   sessionId: session.id,
@@ -461,10 +612,7 @@ export class AgentSession extends Context.Service<
               return;
             }
 
-            const [id, timestamp] = yield* Effect.all([
-              Effect.map(crypto.randomUUIDv7, (value) => PendingInputId.make(value)),
-              now,
-            ]);
+            const [id, timestamp] = yield* Effect.all([makePendingInputId(crypto), now]);
             const kind = input._tag === "Steer" ? "steer" : "queue";
             yield* store.enqueue(
               new StoredPendingInput({
@@ -475,7 +623,10 @@ export class AgentSession extends Context.Service<
                 createdAt: timestamp,
               }),
             );
-            if (kind === "steer") yield* Ref.set(steerRequested, true);
+            if (kind === "steer") {
+              yield* Ref.set(steerRequested, true);
+              yield* requestGenerationInterrupt();
+            }
             if (currentPhase === "idle") yield* setPhase("checking-tokens");
             yield* publish(
               new InputAccepted({
@@ -527,6 +678,13 @@ export class AgentSession extends Context.Service<
         );
 
         yield* publish(new SessionOpened({ sessionId: session.id }));
+        const hasRecoveredWork =
+          Option.isSome(recoveredActiveTurn) ||
+          recoveredPending.queue > 0 ||
+          recoveredPending.steer > 0;
+        if (hasRecoveredWork) yield* setPhase("checking-tokens");
+        yield* Effect.forkScoped(driver);
+        if (hasRecoveredWork) yield* Queue.offer(wake, undefined);
 
         return AgentSession.of({
           id: session.id,

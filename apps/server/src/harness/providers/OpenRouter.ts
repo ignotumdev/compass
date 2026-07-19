@@ -13,6 +13,8 @@ const binding = (
   provider,
   model,
   layer: OpenRouterLanguageModel.layer({ model }).pipe(Layer.provide(client)),
+  transformGeneration: (effect, options) =>
+    OpenRouterLanguageModel.withConfigOverride(effect, { max_tokens: options.maxOutputTokens }),
 });
 
 export const layers = (options: {

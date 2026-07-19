@@ -15,7 +15,8 @@ export class TokenCounter extends Context.Service<
       const tokenizer = yield* Effect.serviceOption(Tokenizer.Tokenizer);
       const estimate = (prompt: Prompt.Prompt) => {
         const encoded = Schema.encodeSync(Prompt.Prompt)(prompt);
-        return tokenCount(Math.max(1, Math.ceil(JSON.stringify(encoded).length / 4)));
+        const bytes = new TextEncoder().encode(JSON.stringify(encoded)).byteLength;
+        return tokenCount(Math.max(1, Math.ceil(bytes / 4)));
       };
       return TokenCounter.of({
         count: (prompt) =>

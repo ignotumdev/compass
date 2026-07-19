@@ -2,6 +2,7 @@ import {
   type ContextPosition,
   type MessageId,
   type MessageSequence,
+  type PendingInputId,
   PendingCounts,
   type PendingInputKind,
   type SessionId,
@@ -11,11 +12,12 @@ import {
   type StoredPendingInput,
   type StoredSession,
   StoredTurn,
+  TimestampMillis,
   type TurnId,
   type TurnStatus,
   TokenCount,
 } from "@compass/contracts";
-import { Context, Effect, Layer, Option, Ref } from "effect";
+import { Clock, Context, Effect, Layer, Option, Ref } from "effect";
 
 export interface SessionStoreService {
   readonly createSession: (session: StoredSession) => Effect.Effect<void, SessionPersistenceError>;
@@ -23,6 +25,12 @@ export interface SessionStoreService {
     sessionId: SessionId,
   ) => Effect.Effect<Option.Option<StoredSession>, SessionPersistenceError>;
   readonly createTurn: (turn: StoredTurn) => Effect.Effect<void, SessionPersistenceError>;
+  readonly getTurn: (
+    turnId: TurnId,
+  ) => Effect.Effect<Option.Option<StoredTurn>, SessionPersistenceError>;
+  readonly activeTurn: (
+    sessionId: SessionId,
+  ) => Effect.Effect<Option.Option<StoredTurn>, SessionPersistenceError>;
   readonly updateTurnStatus: (
     turnId: TurnId,
     status: TurnStatus,
@@ -46,10 +54,20 @@ export interface SessionStoreService {
     latestUserMessageId: MessageId,
   ) => Effect.Effect<void, SessionPersistenceError>;
   readonly enqueue: (input: StoredPendingInput) => Effect.Effect<void, SessionPersistenceError>;
-  readonly takePending: (
+  readonly peekPending: (
     sessionId: SessionId,
     kind: PendingInputKind,
   ) => Effect.Effect<Option.Option<StoredPendingInput>, SessionPersistenceError>;
+  readonly removePending: (inputId: PendingInputId) => Effect.Effect<void, SessionPersistenceError>;
+  readonly beginTurn: (
+    inputId: PendingInputId,
+    turn: StoredTurn,
+    firstMessage: StoredMessage,
+  ) => Effect.Effect<void, SessionPersistenceError>;
+  readonly appendPendingMessage: (
+    inputId: PendingInputId,
+    message: StoredMessage,
+  ) => Effect.Effect<void, SessionPersistenceError>;
   readonly pendingCounts: (
     sessionId: SessionId,
   ) => Effect.Effect<PendingCounts, SessionPersistenceError>;
@@ -72,12 +90,26 @@ export class SessionStore extends Context.Service<SessionStore, SessionStoreServ
       const createSession = Effect.fn("SessionStore.memory.createSession")(function* (
         session: StoredSession,
       ) {
-        yield* Ref.update(state, (current) => ({
-          ...current,
-          sessions: new Map(current.sessions).set(session.id, session),
-          context: new Map(current.context).set(session.id, []),
-          pending: new Map(current.pending).set(session.id, []),
-        }));
+        const created = yield* Ref.modify(state, (current) =>
+          current.sessions.has(session.id)
+            ? ([false, current] as const)
+            : ([
+                true,
+                {
+                  ...current,
+                  sessions: new Map(current.sessions).set(session.id, session),
+                  context: new Map(current.context).set(session.id, []),
+                  pending: new Map(current.pending).set(session.id, []),
+                },
+              ] as const),
+        );
+        if (!created) {
+          return yield* new SessionPersistenceError({
+            operation: "createSession",
+            message: `Session ${session.id} already exists`,
+            cause: new Error("Duplicate session identifier"),
+          });
+        }
       });
 
       const getSession = Effect.fn("SessionStore.memory.getSession")(function* (
@@ -88,16 +120,47 @@ export class SessionStore extends Context.Service<SessionStore, SessionStoreServ
       });
 
       const createTurn = Effect.fn("SessionStore.memory.createTurn")(function* (turn: StoredTurn) {
-        yield* Ref.update(state, (current) => ({
-          ...current,
-          turns: new Map(current.turns).set(turn.id, turn),
-        }));
+        const created = yield* Ref.modify(state, (current) => {
+          const hasActiveTurn = [...current.turns.values()].some(
+            (existing) => existing.sessionId === turn.sessionId && existing.status === "active",
+          );
+          if (current.turns.has(turn.id) || (turn.status === "active" && hasActiveTurn)) {
+            return [false, current] as const;
+          }
+          return [true, { ...current, turns: new Map(current.turns).set(turn.id, turn) }] as const;
+        });
+        if (!created) {
+          return yield* new SessionPersistenceError({
+            operation: "createTurn",
+            message: `Turn ${turn.id} conflicts with an existing turn`,
+            cause: new Error("Duplicate or concurrently active turn"),
+          });
+        }
+      });
+
+      const getTurn = Effect.fn("SessionStore.memory.getTurn")(function* (turnId: TurnId) {
+        const current = yield* Ref.get(state);
+        return Option.fromNullishOr(current.turns.get(turnId));
+      });
+
+      const activeTurn = Effect.fn("SessionStore.memory.activeTurn")(function* (
+        sessionId: SessionId,
+      ) {
+        const current = yield* Ref.get(state);
+        return Option.fromNullishOr(
+          [...current.turns.values()]
+            .filter((turn) => turn.sessionId === sessionId && turn.status === "active")
+            .toSorted(
+              (left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id),
+            )[0],
+        );
       });
 
       const updateTurnStatus = Effect.fn("SessionStore.memory.updateTurnStatus")(function* (
         turnId: TurnId,
         status: TurnStatus,
       ) {
+        const updatedAt = TimestampMillis.make(yield* Clock.currentTimeMillis);
         yield* Ref.update(state, (current) => {
           const turn = current.turns.get(turnId);
           if (turn === undefined) return current;
@@ -110,7 +173,7 @@ export class SessionStore extends Context.Service<SessionStore, SessionStoreServ
                 sessionId: turn.sessionId,
                 status,
                 createdAt: turn.createdAt,
-                updatedAt: turn.updatedAt,
+                updatedAt,
               }),
             ),
           };
@@ -121,16 +184,27 @@ export class SessionStore extends Context.Service<SessionStore, SessionStoreServ
         message: StoredMessage,
         active: boolean,
       ) {
-        yield* Ref.update(state, (current) => {
+        const appended = yield* Ref.modify(state, (current) => {
+          if (current.messages.has(message.id)) return [false, current] as const;
           const messages = new Map(current.messages).set(message.id, message);
-          if (!active) return { ...current, messages };
+          if (!active) return [true, { ...current, messages }] as const;
           const activeIds = current.context.get(message.sessionId) ?? [];
-          return {
-            ...current,
-            messages,
-            context: new Map(current.context).set(message.sessionId, [...activeIds, message.id]),
-          };
+          return [
+            true,
+            {
+              ...current,
+              messages,
+              context: new Map(current.context).set(message.sessionId, [...activeIds, message.id]),
+            },
+          ] as const;
         });
+        if (!appended) {
+          return yield* new SessionPersistenceError({
+            operation: "appendMessage",
+            message: `Message ${message.id} already exists`,
+            cause: new Error("Duplicate message identifier"),
+          });
+        }
       });
 
       const activeMessages = Effect.fn("SessionStore.memory.activeMessages")(
@@ -181,47 +255,174 @@ export class SessionStore extends Context.Service<SessionStore, SessionStoreServ
         summary: StoredMessage,
         latestUserMessageId: MessageId,
       ) {
-        yield* Ref.update(state, (current) => ({
-          ...current,
-          messages: new Map(current.messages).set(summary.id, summary),
-          context: new Map(current.context).set(summary.sessionId, [
-            summary.id,
-            latestUserMessageId,
-          ]),
-        }));
+        const committed = yield* Ref.modify(state, (current) => {
+          const latest = current.messages.get(latestUserMessageId);
+          if (
+            current.messages.has(summary.id) ||
+            latest === undefined ||
+            latest.sessionId !== summary.sessionId
+          ) {
+            return [false, current] as const;
+          }
+          return [
+            true,
+            {
+              ...current,
+              messages: new Map(current.messages).set(summary.id, summary),
+              context: new Map(current.context).set(summary.sessionId, [
+                summary.id,
+                latestUserMessageId,
+              ]),
+            },
+          ] as const;
+        });
+        if (!committed) {
+          return yield* new SessionPersistenceError({
+            operation: "commitCompaction",
+            message: `Could not commit summary message ${summary.id}`,
+            cause: new Error("Duplicate summary or invalid latest user message"),
+          });
+        }
       });
 
       const enqueue = Effect.fn("SessionStore.memory.enqueue")(function* (
         input: StoredPendingInput,
       ) {
-        yield* Ref.update(state, (current) => ({
-          ...current,
-          pending: new Map(current.pending).set(input.sessionId, [
-            ...(current.pending.get(input.sessionId) ?? []),
-            input,
-          ]),
-        }));
-      });
-
-      const takePending = Effect.fn("SessionStore.memory.takePending")(function* (
-        sessionId: SessionId,
-        kind: PendingInputKind,
-      ) {
-        return yield* Ref.modify(state, (current) => {
-          const pending = current.pending.get(sessionId) ?? [];
-          const index = pending.findIndex((input) => input.kind === kind);
-          if (index < 0) return [Option.none(), current] as const;
-          const input = pending[index]!;
-          const nextPending = [...pending];
-          nextPending.splice(index, 1);
+        const enqueued = yield* Ref.modify(state, (current) => {
+          const duplicate = [...current.pending.values()].some((inputs) =>
+            inputs.some((existing) => existing.id === input.id),
+          );
+          if (duplicate || !current.sessions.has(input.sessionId)) {
+            return [false, current] as const;
+          }
           return [
-            Option.some(input),
+            true,
             {
               ...current,
-              pending: new Map(current.pending).set(sessionId, nextPending),
+              pending: new Map(current.pending).set(input.sessionId, [
+                ...(current.pending.get(input.sessionId) ?? []),
+                input,
+              ]),
             },
           ] as const;
         });
+        if (!enqueued) {
+          return yield* new SessionPersistenceError({
+            operation: "enqueue",
+            message: `Could not enqueue pending input ${input.id}`,
+            cause: new Error("Duplicate input or missing session"),
+          });
+        }
+      });
+
+      const peekPending = Effect.fn("SessionStore.memory.peekPending")(function* (
+        sessionId: SessionId,
+        kind: PendingInputKind,
+      ) {
+        const current = yield* Ref.get(state);
+        const pending = current.pending.get(sessionId) ?? [];
+        const matching = pending
+          .filter((input) => input.kind === kind)
+          .toSorted(
+            (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+          );
+        return Option.fromNullishOr(matching[0]);
+      });
+
+      const removePending = Effect.fn("SessionStore.memory.removePending")(function* (
+        inputId: PendingInputId,
+      ) {
+        yield* Ref.update(state, (current) => ({
+          ...current,
+          pending: new Map(
+            [...current.pending].map(([sessionId, inputs]) => [
+              sessionId,
+              inputs.filter((input) => input.id !== inputId),
+            ]),
+          ),
+        }));
+      });
+
+      const beginTurn = Effect.fn("SessionStore.memory.beginTurn")(function* (
+        inputId: PendingInputId,
+        turn: StoredTurn,
+        firstMessage: StoredMessage,
+      ) {
+        const committed = yield* Ref.modify(state, (current) => {
+          const pending = current.pending.get(firstMessage.sessionId) ?? [];
+          const hasInput = pending.some((input) => input.id === inputId);
+          const hasActiveTurn = [...current.turns.values()].some(
+            (existing) => existing.sessionId === turn.sessionId && existing.status === "active",
+          );
+          if (
+            !hasInput ||
+            turn.status !== "active" ||
+            turn.sessionId !== firstMessage.sessionId ||
+            firstMessage.turnId !== turn.id ||
+            current.turns.has(turn.id) ||
+            current.messages.has(firstMessage.id) ||
+            hasActiveTurn
+          ) {
+            return [false, current] as const;
+          }
+          return [
+            true,
+            {
+              ...current,
+              turns: new Map(current.turns).set(turn.id, turn),
+              messages: new Map(current.messages).set(firstMessage.id, firstMessage),
+              context: new Map(current.context).set(firstMessage.sessionId, [
+                ...(current.context.get(firstMessage.sessionId) ?? []),
+                firstMessage.id,
+              ]),
+              pending: new Map(current.pending).set(
+                firstMessage.sessionId,
+                pending.filter((input) => input.id !== inputId),
+              ),
+            },
+          ] as const;
+        });
+        if (!committed) {
+          return yield* new SessionPersistenceError({
+            operation: "beginTurn",
+            message: `Could not atomically start turn ${turn.id} from pending input ${inputId}`,
+            cause: new Error("Pending input missing or turn/message conflict"),
+          });
+        }
+      });
+
+      const appendPendingMessage = Effect.fn("SessionStore.memory.appendPendingMessage")(function* (
+        inputId: PendingInputId,
+        message: StoredMessage,
+      ) {
+        const committed = yield* Ref.modify(state, (current) => {
+          const pending = current.pending.get(message.sessionId) ?? [];
+          if (!pending.some((input) => input.id === inputId) || current.messages.has(message.id)) {
+            return [false, current] as const;
+          }
+          return [
+            true,
+            {
+              ...current,
+              messages: new Map(current.messages).set(message.id, message),
+              context: new Map(current.context).set(message.sessionId, [
+                ...(current.context.get(message.sessionId) ?? []),
+                message.id,
+              ]),
+              pending: new Map(current.pending).set(
+                message.sessionId,
+                pending.filter((input) => input.id !== inputId),
+              ),
+            },
+          ] as const;
+        });
+        if (!committed) {
+          return yield* new SessionPersistenceError({
+            operation: "appendPendingMessage",
+            message: `Could not atomically append pending input ${inputId}`,
+            cause: new Error("Pending input missing or message conflict"),
+          });
+        }
       });
 
       const pendingCounts = Effect.fn("SessionStore.memory.pendingCounts")(function* (
@@ -239,6 +440,8 @@ export class SessionStore extends Context.Service<SessionStore, SessionStoreServ
         createSession,
         getSession,
         createTurn,
+        getTurn,
+        activeTurn,
         updateTurnStatus,
         appendMessage,
         nextMessageSequence,
@@ -246,7 +449,10 @@ export class SessionStore extends Context.Service<SessionStore, SessionStoreServ
         replaceActiveContext,
         commitCompaction,
         enqueue,
-        takePending,
+        peekPending,
+        removePending,
+        beginTurn,
+        appendPendingMessage,
         pendingCounts,
       });
     }),
