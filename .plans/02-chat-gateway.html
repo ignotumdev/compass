@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Compass Chat Gateway — Implementation Plan</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+              mono: ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "monospace"],
+            },
+          },
+        },
+      };
+    </script>
+  </head>
+  <body
+    class="min-h-screen bg-neutral-950 text-neutral-50 antialiased selection:bg-neutral-50 selection:text-neutral-950"
+  >
+    <main class="mx-auto max-w-6xl px-5 py-10 sm:px-8 lg:py-16">
+      <header class="border-b border-neutral-800 pb-10">
+        <div
+          class="mb-6 flex flex-wrap items-center gap-3 text-xs font-medium uppercase tracking-[0.2em] text-neutral-400"
+        >
+          <span class="rounded-full border border-neutral-700 px-3 py-1.5 text-neutral-50">02</span>
+          <span>Implementation plan</span>
+          <span class="text-neutral-700">/</span>
+          <span>apps/server/src/gateway</span>
+        </div>
+        <div class="grid gap-8 lg:grid-cols-[1fr_22rem] lg:items-end">
+          <div>
+            <h1 class="max-w-4xl text-4xl font-semibold tracking-tight sm:text-6xl">
+              Effect-native chat gateway
+            </h1>
+            <p class="mt-5 max-w-3xl text-base leading-7 text-neutral-400 sm:text-lg">
+              A small, reusable boundary for adapter-qualified channels, finished messages,
+              local-file attachments, and resilient inbound streams—starting with a complete
+              Telegram Bot API polling adapter.
+            </p>
+          </div>
+          <dl
+            class="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-neutral-800 bg-neutral-800 text-sm"
+          >
+            <div class="bg-neutral-900 p-4">
+              <dt class="text-neutral-500">Runtime</dt>
+              <dd class="mt-1 font-medium">Effect v4</dd>
+            </div>
+            <div class="bg-neutral-900 p-4">
+              <dt class="text-neutral-500">Transport</dt>
+              <dd class="mt-1 font-medium">Polling</dd>
+            </div>
+            <div class="bg-neutral-900 p-4">
+              <dt class="text-neutral-500">First adapter</dt>
+              <dd class="mt-1 font-medium">Telegram</dd>
+            </div>
+            <div class="bg-neutral-900 p-4">
+              <dt class="text-neutral-500">Message mode</dt>
+              <dd class="mt-1 font-medium">Finished only</dd>
+            </div>
+          </dl>
+        </div>
+      </header>
+
+      <section class="grid gap-4 py-10 md:grid-cols-3">
+        <article class="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+          <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">Core decision</p>
+          <h2 class="mt-3 text-lg font-medium">One normalized contract</h2>
+          <p class="mt-2 text-sm leading-6 text-neutral-400">
+            Adapters expose an incoming stream and a discrete send effect. The gateway adds
+            authorization, routing, and a derived outgoing-stream consumer.
+          </p>
+        </article>
+        <article class="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+          <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">Access model</p>
+          <h2 class="mt-3 text-lg font-medium">Qualified channel IDs</h2>
+          <p class="mt-2 text-sm leading-6 text-neutral-400">
+            <code class="font-mono text-neutral-200">telegram:&lt;chat-id&gt;</code> is the
+            adapter-independent authorization key. Optional topic/thread identity stays separate.
+          </p>
+        </article>
+        <article class="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+          <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">Files</p>
+          <h2 class="mt-3 text-lg font-medium">Paths at the boundary</h2>
+          <p class="mt-2 text-sm leading-6 text-neutral-400">
+            Outbound attachments reference local paths. Inbound media is downloaded before emission
+            and points into <code class="font-mono text-neutral-200">~/.compass/files</code>.
+          </p>
+        </article>
+      </section>
+
+      <section class="border-t border-neutral-800 py-10">
+        <div class="grid gap-8 lg:grid-cols-[17rem_1fr]">
+          <div>
+            <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">01 / Boundary</p>
+            <h2 class="mt-3 text-2xl font-semibold tracking-tight">Public API shape</h2>
+          </div>
+          <div class="space-y-5">
+            <div
+              class="rounded-xl border border-neutral-800 bg-neutral-900 p-5 font-mono text-sm leading-7 text-neutral-300"
+            >
+              <p>
+                <span class="text-neutral-500">Gateway.</span>incoming
+                <span class="text-neutral-600">:</span> Stream&lt;IncomingMessage, GatewayError&gt;
+              </p>
+              <p>
+                <span class="text-neutral-500">Gateway.</span>send(message)
+                <span class="text-neutral-600">:</span> Effect&lt;SentMessage, GatewayError&gt;
+              </p>
+              <p>
+                <span class="text-neutral-500">Gateway.</span>sendAll(outgoing, options?)
+                <span class="text-neutral-600">:</span> Stream&lt;SentMessage, GatewayError | E,
+                R&gt;
+              </p>
+            </div>
+            <p class="text-sm leading-6 text-neutral-400">
+              <code class="font-mono text-neutral-200">send</code> is the reliable primitive: one
+              finished message produces one delivery result or one typed failure.
+              <code class="font-mono text-neutral-200">sendAll</code> is the stream-oriented
+              convenience requested by callers and uses explicit, bounded concurrency. It does not
+              silently detach fibers or swallow delivery errors.
+            </p>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div class="rounded-xl border border-neutral-800 p-5">
+                <h3 class="font-medium">Normalized message</h3>
+                <ul class="mt-3 space-y-2 text-sm text-neutral-400">
+                  <li>Stable adapter message ID</li>
+                  <li>Qualified channel plus optional thread</li>
+                  <li>Sender identity and received timestamp</li>
+                  <li>Optional text and zero-or-more files</li>
+                </ul>
+              </div>
+              <div class="rounded-xl border border-neutral-800 p-5">
+                <h3 class="font-medium">Attachment metadata</h3>
+                <ul class="mt-3 space-y-2 text-sm text-neutral-400">
+                  <li>Absolute local path</li>
+                  <li>Safe display filename</li>
+                  <li>Optional media type and byte size</li>
+                  <li>Kind: image, audio, video, or file</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-10">
+        <div class="grid gap-8 lg:grid-cols-[17rem_1fr]">
+          <div>
+            <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">02 / Architecture</p>
+            <h2 class="mt-3 text-2xl font-semibold tracking-tight">Layers and ownership</h2>
+          </div>
+          <div>
+            <div class="grid gap-3 text-sm md:grid-cols-[1fr_auto_1fr_auto_1fr] md:items-center">
+              <div class="rounded-xl border border-neutral-700 bg-neutral-50 p-5 text-neutral-950">
+                <p class="text-xs uppercase tracking-wider text-neutral-500">Application</p>
+                <p class="mt-2 font-semibold">Incoming consumer</p>
+                <p class="mt-1 text-neutral-600">Outgoing message stream</p>
+              </div>
+              <div class="hidden text-neutral-600 md:block">⇄</div>
+              <div class="rounded-xl border border-neutral-700 bg-neutral-900 p-5">
+                <p class="text-xs uppercase tracking-wider text-neutral-500">Gateway</p>
+                <p class="mt-2 font-semibold">Authorize + route</p>
+                <p class="mt-1 text-neutral-400">Merge adapter streams</p>
+              </div>
+              <div class="hidden text-neutral-600 md:block">⇄</div>
+              <div class="rounded-xl border border-neutral-700 bg-neutral-900 p-5">
+                <p class="text-xs uppercase tracking-wider text-neutral-500">Adapter</p>
+                <p class="mt-2 font-semibold">Telegram polling</p>
+                <p class="mt-1 text-neutral-400">Bot API + file transfer</p>
+              </div>
+            </div>
+            <div class="mt-5 grid gap-3 sm:grid-cols-3">
+              <div class="rounded-lg border border-neutral-800 p-4">
+                <p class="font-medium">GatewayConfig</p>
+                <p class="mt-1 text-sm text-neutral-500">Schema-decodes gateway.json</p>
+              </div>
+              <div class="rounded-lg border border-neutral-800 p-4">
+                <p class="font-medium">GatewayFiles</p>
+                <p class="mt-1 text-sm text-neutral-500">Safe durable file writes</p>
+              </div>
+              <div class="rounded-lg border border-neutral-800 p-4">
+                <p class="font-medium">HttpClient</p>
+                <p class="mt-1 text-sm text-neutral-500">Injected Bot API transport</p>
+              </div>
+            </div>
+            <p class="mt-5 text-sm leading-6 text-neutral-400">
+              The adapter contract contains no Telegram types. Each adapter supplies a stable name,
+              an incoming stream, and a send implementation. A scoped Telegram layer owns the
+              long-poll lifecycle, so closing the parent scope interrupts in-flight HTTP and retry
+              delays cleanly.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-10">
+        <div class="grid gap-8 lg:grid-cols-[17rem_1fr]">
+          <div>
+            <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">03 / Configuration</p>
+            <h2 class="mt-3 text-2xl font-semibold tracking-tight">
+              Non-secret, strict, predictable
+            </h2>
+          </div>
+          <div class="grid gap-5 lg:grid-cols-2">
+            <pre
+              class="overflow-x-auto rounded-xl border border-neutral-800 bg-neutral-900 p-5 font-mono text-xs leading-6 text-neutral-300"
+            ><code>{
+  "version": 1,
+  "allowedChannels": [
+    "telegram:123456789",
+    "telegram:-100987654321"
+  ],
+  "adapters": {
+    "telegram": {
+      "pollingTimeoutSeconds": 30,
+      "pollingLimit": 100,
+      "maxInboundFileBytes": 52428800,
+      "deleteWebhook": true,
+      "dropPendingUpdates": false
+    }
+  }
+}</code></pre>
+            <div class="space-y-4 text-sm leading-6 text-neutral-400">
+              <p>
+                The default path is resolved portably from
+                <code class="font-mono text-neutral-200">HOME</code> or
+                <code class="font-mono text-neutral-200">USERPROFILE</code>. Missing or invalid
+                configuration fails layer construction with a typed configuration error.
+              </p>
+              <p>
+                The bot token remains outside the JSON file and is read through Effect Config from
+                <code class="font-mono text-neutral-200">TELEGRAM_BOT_TOKEN</code>. An optional API
+                base URL may be injected for deterministic tests.
+              </p>
+              <p>
+                Authorization is exact-match and deny-by-default. Topics inherit their Telegram
+                chat’s qualified channel authorization; the optional thread identifier only controls
+                reply placement.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-10">
+        <div class="grid gap-8 lg:grid-cols-[17rem_1fr]">
+          <div>
+            <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">04 / Telegram</p>
+            <h2 class="mt-3 text-2xl font-semibold tracking-tight">Polling and media flows</h2>
+          </div>
+          <div class="grid gap-4 md:grid-cols-2">
+            <article class="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+              <h3 class="font-medium">Incoming</h3>
+              <ol class="mt-4 space-y-3 text-sm text-neutral-400">
+                <li>
+                  <span class="mr-2 text-neutral-600">01</span>Long-poll
+                  <code class="font-mono text-neutral-200">getUpdates</code> with the current
+                  offset.
+                </li>
+                <li>
+                  <span class="mr-2 text-neutral-600">02</span>Advance offset monotonically for
+                  every observed update.
+                </li>
+                <li>
+                  <span class="mr-2 text-neutral-600">03</span>Normalize message/channel/sender data
+                  and select the largest photo rendition.
+                </li>
+                <li>
+                  <span class="mr-2 text-neutral-600">04</span>Resolve each attachment using
+                  <code class="font-mono text-neutral-200">getFile</code> and enforce its size
+                  limit.
+                </li>
+                <li>
+                  <span class="mr-2 text-neutral-600">05</span>Stream it into an atomic write under
+                  <code class="font-mono text-neutral-200">~/.compass/files</code> without buffering
+                  the full download.
+                </li>
+                <li>
+                  <span class="mr-2 text-neutral-600">06</span>Emit only when the qualified channel
+                  is allowed.
+                </li>
+              </ol>
+            </article>
+            <article class="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+              <h3 class="font-medium">Outgoing</h3>
+              <ol class="mt-4 space-y-3 text-sm text-neutral-400">
+                <li>
+                  <span class="mr-2 text-neutral-600">01</span>Validate the destination and every
+                  local attachment path.
+                </li>
+                <li>
+                  <span class="mr-2 text-neutral-600">02</span>Route by the channel’s adapter
+                  prefix.
+                </li>
+                <li>
+                  <span class="mr-2 text-neutral-600">03</span>Use
+                  <code class="font-mono text-neutral-200">sendMessage</code>,
+                  <code class="font-mono text-neutral-200">sendPhoto</code>,
+                  <code class="font-mono text-neutral-200">sendAudio</code>,
+                  <code class="font-mono text-neutral-200">sendVoice</code>, or
+                  <code class="font-mono text-neutral-200">sendDocument</code>.
+                </li>
+                <li>
+                  <span class="mr-2 text-neutral-600">04</span>Use text as a caption where
+                  supported; otherwise send text separately.
+                </li>
+                <li>
+                  <span class="mr-2 text-neutral-600">05</span>Return normalized Telegram delivery
+                  identifiers.
+                </li>
+              </ol>
+            </article>
+            <div
+              class="md:col-span-2 rounded-xl border border-neutral-800 p-5 text-sm leading-6 text-neutral-400"
+            >
+              Poll failures retry with a capped exponential Effect
+              <code class="font-mono text-neutral-200">Schedule</code> and structured logs.
+              Successful polls reset backoff. Telegram API envelopes and update payloads are
+              schema-decoded; malformed individual updates are logged and skipped without killing
+              the adapter stream. Authentication/configuration failures remain terminal.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-10">
+        <div class="grid gap-8 lg:grid-cols-[17rem_1fr]">
+          <div>
+            <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">05 / Files</p>
+            <h2 class="mt-3 text-2xl font-semibold tracking-tight">Proposed module tree</h2>
+          </div>
+          <div class="overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900">
+            <pre
+              class="overflow-x-auto p-6 font-mono text-xs leading-6 text-neutral-300"
+            ><code>packages/contracts/src/
+├── gateway.ts                # schemas, domain types, errors, adapter contract
+└── gateway.test.ts
+
+apps/server/src/gateway/
+├── Gateway.ts                 # service, routing, authorization, stream helpers
+├── GatewayConfig.ts           # gateway.json schema + default filesystem layer
+├── GatewayFiles.ts            # inbound persistence + outbound path reads
+├── index.ts                   # public exports
+├── Gateway.test.ts
+├── GatewayConfig.test.ts
+├── GatewayFiles.test.ts
+└── adapters/
+    └── telegram/
+        ├── TelegramAdapter.ts # Effect service/layer + normalization + sending
+        ├── TelegramApi.ts     # typed Bot API HttpClient boundary
+        ├── TelegramModels.ts  # only the Bot API schemas needed here
+        ├── TelegramAdapter.test.ts
+        └── index.ts</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-10">
+        <div class="grid gap-8 lg:grid-cols-[17rem_1fr]">
+          <div>
+            <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">06 / Execution</p>
+            <h2 class="mt-3 text-2xl font-semibold tracking-tight">Implementation sequence</h2>
+          </div>
+          <ol
+            class="grid gap-px overflow-hidden rounded-xl border border-neutral-800 bg-neutral-800"
+          >
+            <li class="grid gap-3 bg-neutral-900 p-5 sm:grid-cols-[3rem_1fr]">
+              <span class="font-mono text-sm text-neutral-500">01</span>
+              <div>
+                <h3 class="font-medium">Model the domain</h3>
+                <p class="mt-1 text-sm text-neutral-400">
+                  Define Schema-based messages, qualified channel IDs, attachments, delivery
+                  receipts, adapter contract, and tagged error families.
+                </p>
+              </div>
+            </li>
+            <li class="grid gap-3 bg-neutral-900 p-5 sm:grid-cols-[3rem_1fr]">
+              <span class="font-mono text-sm text-neutral-500">02</span>
+              <div>
+                <h3 class="font-medium">Build configuration and file services</h3>
+                <p class="mt-1 text-sm text-neutral-400">
+                  Decode gateway.json, resolve Compass paths, create the files directory, sanitize
+                  filenames, and write downloads atomically.
+                </p>
+              </div>
+            </li>
+            <li class="grid gap-3 bg-neutral-900 p-5 sm:grid-cols-[3rem_1fr]">
+              <span class="font-mono text-sm text-neutral-500">03</span>
+              <div>
+                <h3 class="font-medium">Implement the Telegram API boundary</h3>
+                <p class="mt-1 text-sm text-neutral-400">
+                  Use Effect HttpClient and Schema for getMe, deleteWebhook, getUpdates, getFile,
+                  downloads, JSON requests, and multipart uploads.
+                </p>
+              </div>
+            </li>
+            <li class="grid gap-3 bg-neutral-900 p-5 sm:grid-cols-[3rem_1fr]">
+              <span class="font-mono text-sm text-neutral-500">04</span>
+              <div>
+                <h3 class="font-medium">Implement scoped polling</h3>
+                <p class="mt-1 text-sm text-neutral-400">
+                  Create a lazy incoming stream, track offset, normalize supported messages, persist
+                  attachments, and make interruption immediate and leak-free.
+                </p>
+              </div>
+            </li>
+            <li class="grid gap-3 bg-neutral-900 p-5 sm:grid-cols-[3rem_1fr]">
+              <span class="font-mono text-sm text-neutral-500">05</span>
+              <div>
+                <h3 class="font-medium">Compose the gateway</h3>
+                <p class="mt-1 text-sm text-neutral-400">
+                  Merge adapter streams, enforce allowlisting in both directions, route sends, and
+                  expose bounded outgoing-stream processing.
+                </p>
+              </div>
+            </li>
+            <li class="grid gap-3 bg-neutral-900 p-5 sm:grid-cols-[3rem_1fr]">
+              <span class="font-mono text-sm text-neutral-500">06</span>
+              <div>
+                <h3 class="font-medium">Test and publish</h3>
+                <p class="mt-1 text-sm text-neutral-400">
+                  Exercise config, authorization, ordering, retry, interruption, media
+                  download/upload, then run repository readiness and typecheck gates.
+                </p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="border-t border-neutral-800 py-10">
+        <div class="grid gap-8 lg:grid-cols-[17rem_1fr]">
+          <div>
+            <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">07 / Validation</p>
+            <h2 class="mt-3 text-2xl font-semibold tracking-tight">Acceptance matrix</h2>
+          </div>
+          <div class="overflow-x-auto rounded-xl border border-neutral-800">
+            <table class="w-full min-w-[42rem] text-left text-sm">
+              <thead class="border-b border-neutral-800 bg-neutral-900 text-neutral-400">
+                <tr>
+                  <th class="px-4 py-3 font-medium">Area</th>
+                  <th class="px-4 py-3 font-medium">Proof</th>
+                  <th class="px-4 py-3 font-medium">Expected outcome</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-neutral-800">
+                <tr>
+                  <td class="px-4 py-3 text-neutral-200">Authorization</td>
+                  <td class="px-4 py-3 text-neutral-400">Allowed and denied channel tests</td>
+                  <td class="px-4 py-3 text-neutral-400">Exact-match, deny-by-default</td>
+                </tr>
+                <tr>
+                  <td class="px-4 py-3 text-neutral-200">Polling</td>
+                  <td class="px-4 py-3 text-neutral-400">Scripted getUpdates responses</td>
+                  <td class="px-4 py-3 text-neutral-400">
+                    Offsets advance; duplicates are avoided
+                  </td>
+                </tr>
+                <tr>
+                  <td class="px-4 py-3 text-neutral-200">Resilience</td>
+                  <td class="px-4 py-3 text-neutral-400">Transient failures + test clock</td>
+                  <td class="px-4 py-3 text-neutral-400">Capped backoff and recovery</td>
+                </tr>
+                <tr>
+                  <td class="px-4 py-3 text-neutral-200">Shutdown</td>
+                  <td class="px-4 py-3 text-neutral-400">Scoped stream interruption</td>
+                  <td class="px-4 py-3 text-neutral-400">Active long poll is cancelled</td>
+                </tr>
+                <tr>
+                  <td class="px-4 py-3 text-neutral-200">Inbound files</td>
+                  <td class="px-4 py-3 text-neutral-400">Photo, audio, voice, document fixtures</td>
+                  <td class="px-4 py-3 text-neutral-400">Safe files exist before emission</td>
+                </tr>
+                <tr>
+                  <td class="px-4 py-3 text-neutral-200">Outbound files</td>
+                  <td class="px-4 py-3 text-neutral-400">Multipart request inspection</td>
+                  <td class="px-4 py-3 text-neutral-400">Correct Bot API method and caption</td>
+                </tr>
+                <tr>
+                  <td class="px-4 py-3 text-neutral-200">Repository</td>
+                  <td class="px-4 py-3 font-mono text-neutral-400">
+                    vp run ready<br />vp run typecheck
+                  </td>
+                  <td class="px-4 py-3 text-neutral-400">Both commands pass</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="border-y border-neutral-800 py-10">
+        <div class="grid gap-8 lg:grid-cols-[17rem_1fr]">
+          <div>
+            <p class="text-xs uppercase tracking-[0.18em] text-neutral-500">
+              08 / Deliberate limits
+            </p>
+            <h2 class="mt-3 text-2xl font-semibold tracking-tight">Not in this slice</h2>
+          </div>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-400">
+              No token/message streaming or edit-in-place responses.
+            </div>
+            <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-400">
+              No mentions, reactions, commands, buttons, or webhook server.
+            </div>
+            <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-400">
+              No remote-URL or in-memory outbound attachment source.
+            </div>
+            <div class="rounded-lg border border-neutral-800 p-4 text-sm text-neutral-400">
+              No history, subscriptions, distributed state, or Chat SDK compatibility layer.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer
+        class="flex flex-col gap-3 py-8 text-xs text-neutral-600 sm:flex-row sm:items-center sm:justify-between"
+      >
+        <p>Compass / Chat Gateway / Plan 02</p>
+        <p>Designed around Effect services, scoped streams, Schema, FileSystem, and HttpClient.</p>
+      </footer>
+    </main>
+  </body>
+</html>
