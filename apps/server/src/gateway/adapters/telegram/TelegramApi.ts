@@ -1,11 +1,11 @@
-import { Config, Context, Effect, Layer, Redacted, Schema, Stream } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import {
   AdapterName,
   GatewayProtocolError,
   GatewayTransportError,
   type GatewayAdapterError,
-} from "../../Models.ts";
+} from "@compass/contracts";
+import { Config, Context, Effect, Layer, Redacted, Schema, Stream } from "effect";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import {
   type TelegramFile,
   TelegramFile as TelegramFileSchema,

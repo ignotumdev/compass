@@ -7,7 +7,32 @@ import { layerDefault as gatewayFilesLayerDefault } from "./GatewayFiles.ts";
 import { TelegramAdapter } from "./adapters/telegram/TelegramAdapter.ts";
 import { TelegramApi } from "./adapters/telegram/TelegramApi.ts";
 
-export * from "./Adapter.ts";
+export {
+  AdapterName,
+  ChannelId,
+  type GatewayAdapter,
+  type GatewayAdapterError,
+  GatewayAdapterNotFoundError,
+  GatewayAuthorizationError,
+  GatewayConfigurationError,
+  type GatewayError,
+  GatewayFile,
+  GatewayFileError,
+  GatewayFileKind,
+  GatewayInvalidMessageError,
+  GatewayMessageId,
+  GatewayProtocolError,
+  GatewayTimestampMillis,
+  GatewayTransportError,
+  type IncomingAdapterEvent,
+  IncomingMessage,
+  MessageSender,
+  OutgoingMessage,
+  type ParsedChannelId,
+  SentMessage,
+  ThreadId,
+  parseChannelId,
+} from "@compass/contracts";
 export * from "./Gateway.ts";
 export {
   GatewayConfig,
@@ -26,7 +51,6 @@ export {
   layerAt as gatewayFilesLayerAt,
   layerDefault as gatewayFilesLayerDefault,
 } from "./GatewayFiles.ts";
-export * from "./Models.ts";
 export * as Telegram from "./adapters/telegram/index.ts";
 
 export const telegramGatewayLayer = Layer.effect(

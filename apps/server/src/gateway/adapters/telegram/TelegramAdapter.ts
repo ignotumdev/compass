@@ -1,23 +1,24 @@
-import { Context, Effect, Layer, Queue, Schedule, Schema, Stream } from "effect";
-import type { GatewayAdapter, IncomingAdapterEvent } from "../../Adapter.ts";
-import { GatewayConfig } from "../../GatewayConfig.ts";
-import { GatewayFiles } from "../../GatewayFiles.ts";
 import {
   AdapterName,
   ChannelId,
+  type GatewayAdapter,
+  type GatewayFile,
   GatewayFileError,
+  type GatewayFileKind,
   GatewayMessageId,
   GatewayProtocolError,
+  GatewayTimestampMillis,
+  type IncomingAdapterEvent,
   IncomingMessage,
   MessageSender,
+  type OutgoingMessage,
   SentMessage,
   ThreadId,
-  TimestampMillis,
   parseChannelId,
-  type GatewayFile,
-  type GatewayFileKind,
-  type OutgoingMessage,
-} from "../../Models.ts";
+} from "@compass/contracts";
+import { Context, Effect, Layer, Queue, Schedule, Schema, Stream } from "effect";
+import { GatewayConfig } from "../../GatewayConfig.ts";
+import { GatewayFiles } from "../../GatewayFiles.ts";
 import { TelegramApi, type TelegramMediaRequest } from "./TelegramApi.ts";
 import {
   type TelegramMessage,
@@ -249,7 +250,7 @@ export const makeTelegramAdapter = Effect.gen(function* () {
         ? {}
         : { text: message.text ?? message.caption }),
       files: saved,
-      receivedAt: TimestampMillis.make(Math.max(0, Math.trunc(message.date * 1_000))),
+      receivedAt: GatewayTimestampMillis.make(Math.max(0, Math.trunc(message.date * 1_000))),
     });
   });
 

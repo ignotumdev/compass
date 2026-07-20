@@ -26,7 +26,7 @@
         <div
           class="mb-6 flex flex-wrap items-center gap-3 text-xs font-medium uppercase tracking-[0.2em] text-neutral-400"
         >
-          <span class="rounded-full border border-neutral-700 px-3 py-1.5 text-neutral-50">01</span>
+          <span class="rounded-full border border-neutral-700 px-3 py-1.5 text-neutral-50">02</span>
           <span>Implementation plan</span>
           <span class="text-neutral-700">/</span>
           <span>apps/server/src/gateway</span>
@@ -336,12 +336,14 @@
           <div class="overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900">
             <pre
               class="overflow-x-auto p-6 font-mono text-xs leading-6 text-neutral-300"
-            ><code>apps/server/src/gateway/
+            ><code>packages/contracts/src/
+├── gateway.ts                # schemas, domain types, errors, adapter contract
+└── gateway.test.ts
+
+apps/server/src/gateway/
 ├── Gateway.ts                 # service, routing, authorization, stream helpers
 ├── GatewayConfig.ts           # gateway.json schema + default filesystem layer
 ├── GatewayFiles.ts            # inbound persistence + outbound path reads
-├── Models.ts                  # branded IDs, messages, attachments, errors
-├── Adapter.ts                 # platform-neutral adapter contract
 ├── index.ts                   # public exports
 ├── Gateway.test.ts
 ├── GatewayConfig.test.ts
@@ -519,7 +521,7 @@
       <footer
         class="flex flex-col gap-3 py-8 text-xs text-neutral-600 sm:flex-row sm:items-center sm:justify-between"
       >
-        <p>Compass / Chat Gateway / Plan 01</p>
+        <p>Compass / Chat Gateway / Plan 02</p>
         <p>Designed around Effect services, scoped streams, Schema, FileSystem, and HttpClient.</p>
       </footer>
     </main>

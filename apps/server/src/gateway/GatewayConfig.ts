@@ -1,5 +1,5 @@
+import { ChannelId, GatewayConfigurationError } from "@compass/contracts";
 import { Context, Effect, FileSystem, Layer, Path, Schema } from "effect";
-import { ChannelId, GatewayConfigurationError } from "./Models.ts";
 import { compassDirectory } from "./Paths.ts";
 
 const IntegerBetween = (minimum: number, maximum: number) =>

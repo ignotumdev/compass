@@ -1,8 +1,3 @@
-import { describe, expect, it } from "@effect/vitest";
-import { Context, Effect, Latch, Layer, Stream } from "effect";
-import { makeGateway } from "../../Gateway.ts";
-import { GatewayConfig, type GatewaySettings } from "../../GatewayConfig.ts";
-import { GatewayFiles, type GatewayFilesService } from "../../GatewayFiles.ts";
 import {
   ChannelId,
   GatewayFile,
@@ -10,7 +5,12 @@ import {
   GatewayFileError,
   GatewayMessageId,
   OutgoingMessage,
-} from "../../Models.ts";
+} from "@compass/contracts";
+import { describe, expect, it } from "@effect/vitest";
+import { Context, Effect, Latch, Layer, Stream } from "effect";
+import { makeGateway } from "../../Gateway.ts";
+import { GatewayConfig, type GatewaySettings } from "../../GatewayConfig.ts";
+import { GatewayFiles, type GatewayFilesService } from "../../GatewayFiles.ts";
 import { TelegramAdapter } from "./TelegramAdapter.ts";
 import { TelegramApi, type TelegramApiService } from "./TelegramApi.ts";
 

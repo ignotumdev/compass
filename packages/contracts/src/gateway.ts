@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { type Effect, Schema, type Stream } from "effect";
 
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1));
 const NonNegativeInteger = Schema.Finite.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
@@ -18,14 +18,16 @@ export type GatewayMessageId = typeof GatewayMessageId.Type;
 export const ThreadId = NonEmptyString.pipe(Schema.brand("GatewayThreadId"));
 export type ThreadId = typeof ThreadId.Type;
 
-export const TimestampMillis = NonNegativeInteger.pipe(Schema.brand("GatewayTimestampMillis"));
-export type TimestampMillis = typeof TimestampMillis.Type;
+export const GatewayTimestampMillis = NonNegativeInteger.pipe(
+  Schema.brand("GatewayTimestampMillis"),
+);
+export type GatewayTimestampMillis = typeof GatewayTimestampMillis.Type;
 
 export const GatewayFileKind = Schema.Literals(["image", "audio", "video", "file"]);
 export type GatewayFileKind = typeof GatewayFileKind.Type;
 
 export class GatewayFile extends Schema.Class<GatewayFile>(
-  "@compass/server/gateway/Models/GatewayFile",
+  "@compass/contracts/gateway/GatewayFile",
 )({
   path: NonEmptyString,
   name: NonEmptyString,
@@ -35,7 +37,7 @@ export class GatewayFile extends Schema.Class<GatewayFile>(
 }) {}
 
 export class MessageSender extends Schema.Class<MessageSender>(
-  "@compass/server/gateway/Models/MessageSender",
+  "@compass/contracts/gateway/MessageSender",
 )({
   id: NonEmptyString,
   displayName: NonEmptyString,
@@ -44,7 +46,7 @@ export class MessageSender extends Schema.Class<MessageSender>(
 }) {}
 
 export class IncomingMessage extends Schema.Class<IncomingMessage>(
-  "@compass/server/gateway/Models/IncomingMessage",
+  "@compass/contracts/gateway/IncomingMessage",
 )({
   id: GatewayMessageId,
   channel: ChannelId,
@@ -52,11 +54,11 @@ export class IncomingMessage extends Schema.Class<IncomingMessage>(
   sender: MessageSender,
   text: Schema.optionalKey(Schema.String),
   files: Schema.Array(GatewayFile),
-  receivedAt: TimestampMillis,
+  receivedAt: GatewayTimestampMillis,
 }) {}
 
 export class OutgoingMessage extends Schema.Class<OutgoingMessage>(
-  "@compass/server/gateway/Models/OutgoingMessage",
+  "@compass/contracts/gateway/OutgoingMessage",
 )({
   channel: ChannelId,
   thread: Schema.optionalKey(ThreadId),
@@ -65,7 +67,7 @@ export class OutgoingMessage extends Schema.Class<OutgoingMessage>(
 }) {}
 
 export class SentMessage extends Schema.Class<SentMessage>(
-  "@compass/server/gateway/Models/SentMessage",
+  "@compass/contracts/gateway/SentMessage",
 )({
   channel: ChannelId,
   thread: Schema.optionalKey(ThreadId),
@@ -147,3 +149,14 @@ export const parseChannelId = (channel: ChannelId): ParsedChannelId => {
     nativeChannel: channel.slice(separator + 1),
   };
 };
+
+export interface IncomingAdapterEvent {
+  readonly channel: ChannelId;
+  readonly materialize: Effect.Effect<IncomingMessage, GatewayAdapterError>;
+}
+
+export interface GatewayAdapter {
+  readonly name: AdapterName;
+  readonly incoming: Stream.Stream<IncomingAdapterEvent, GatewayAdapterError>;
+  readonly send: (message: OutgoingMessage) => Effect.Effect<SentMessage, GatewayAdapterError>;
+}

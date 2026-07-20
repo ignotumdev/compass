@@ -1,8 +1,5 @@
-import { Context, Effect, Layer, Stream } from "effect";
-import type { GatewayAdapter } from "./Adapter.ts";
-import type { GatewaySettings } from "./GatewayConfig.ts";
-import { GatewayConfig } from "./GatewayConfig.ts";
 import {
+  type GatewayAdapter,
   type GatewayError,
   GatewayAdapterNotFoundError,
   GatewayAuthorizationError,
@@ -12,7 +9,10 @@ import {
   type OutgoingMessage,
   type SentMessage,
   parseChannelId,
-} from "./Models.ts";
+} from "@compass/contracts";
+import { Context, Effect, Layer, Stream } from "effect";
+import type { GatewaySettings } from "./GatewayConfig.ts";
+import { GatewayConfig } from "./GatewayConfig.ts";
 
 export interface SendAllOptions {
   readonly concurrency?: number | "unbounded" | undefined;

@@ -1,5 +1,5 @@
+import { GatewayFile, GatewayFileError, type GatewayFileKind } from "@compass/contracts";
 import { Context, Crypto, Effect, FileSystem, Layer, Path, Schema, Stream } from "effect";
-import { GatewayFile, GatewayFileError, type GatewayFileKind } from "./Models.ts";
 import { compassDirectory } from "./Paths.ts";
 
 const UNSAFE_FILENAME_CHARACTERS = /[^a-zA-Z0-9._-]+/g;

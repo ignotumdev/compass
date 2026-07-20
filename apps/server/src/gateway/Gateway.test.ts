@@ -1,18 +1,18 @@
-import { describe, expect, it } from "@effect/vitest";
-import { Effect, Stream } from "effect";
-import type { GatewayAdapter } from "./Adapter.ts";
-import { makeGateway } from "./Gateway.ts";
-import type { GatewaySettings } from "./GatewayConfig.ts";
 import {
   AdapterName,
   ChannelId,
+  type GatewayAdapter,
   GatewayMessageId,
+  GatewayTimestampMillis,
   IncomingMessage,
   MessageSender,
   OutgoingMessage,
   SentMessage,
-  TimestampMillis,
-} from "./Models.ts";
+} from "@compass/contracts";
+import { describe, expect, it } from "@effect/vitest";
+import { Effect, Stream } from "effect";
+import { makeGateway } from "./Gateway.ts";
+import type { GatewaySettings } from "./GatewayConfig.ts";
 
 const settings = (channels: ReadonlyArray<string>): GatewaySettings => ({
   allowedChannels: new Set(channels.map((channel) => ChannelId.make(channel))),
@@ -39,7 +39,7 @@ const incomingMessage = (channel: string, text: string) =>
     }),
     text,
     files: [],
-    receivedAt: TimestampMillis.make(1),
+    receivedAt: GatewayTimestampMillis.make(1),
   });
 
 describe("Gateway", () => {
